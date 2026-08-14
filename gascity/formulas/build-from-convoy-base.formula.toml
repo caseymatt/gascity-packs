@@ -64,8 +64,15 @@ member_access = "exclusive"
 single_lane = true
 
 [[steps]]
+id = "summarize-implementation"
+title = "Integrate continuation implementation"
+needs = ["implement", "implement-same-session"]
+metadata = { "gc.run_target" = "gc.run-operator", "gc.build.artifact_schema" = "gc.build.implementation-summary.v1", "gc.build.artifact_path_keys" = "gc.build.implementation_summary_path" }
+description_file = "../assets/workflows/build-from-convoy-base/summarize-implementation.md"
+
+[[steps]]
 id = "prepare-review"
 title = "Validate review continuation inputs"
-needs = ["implement", "implement-same-session"]
+needs = ["summarize-implementation"]
 metadata = { "gc.run_target" = "gc.run-operator" }
 description_file = "../assets/workflows/build-from-convoy-base/prepare-review.md"

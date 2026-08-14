@@ -104,6 +104,7 @@ BUILD_FROM_CONVOY_STEPS = BUILD_FROM_REVIEW_STEPS | {
     "prepare-convoy",
     "implement",
     "implement-same-session",
+    "summarize-implementation",
 }
 
 BUILD_FROM_DECOMPOSE_STEPS = BUILD_FROM_CONVOY_STEPS | {
@@ -1707,7 +1708,21 @@ class FormulaAssetTests(unittest.TestCase):
         self.assertEqual(steps["implement-same-session"]["drain"]["member_access"], "exclusive")
         self.assertEqual(steps["implement-same-session"]["drain"]["on_item_failure"], "skip_remaining")
         self.assertTrue(steps["implement-same-session"]["drain"]["item"]["single_lane"])
-        self.assertEqual(steps["prepare-review"]["needs"], ["implement", "implement-same-session"])
+        self.assertEqual(
+            steps["summarize-implementation"]["needs"],
+            ["implement", "implement-same-session"],
+        )
+        self.assertEqual(
+            steps["prepare-review"]["needs"], ["summarize-implementation"]
+        )
+        self.assertEqual(
+            steps["summarize-implementation"]["metadata"]["gc.run_target"],
+            "gc.run-operator",
+        )
+        self.assertEqual(
+            steps["summarize-implementation"]["description_file"],
+            "../assets/workflows/build-from-convoy-base/summarize-implementation.md",
+        )
         self.assertEqual(steps["review"]["needs"], ["prepare-review"])
         self.assertEqual(steps["repair-review"]["needs"], ["review"])
         self.assertEqual(steps["finalize"]["needs"], ["repair-review"])
@@ -1808,7 +1823,13 @@ class FormulaAssetTests(unittest.TestCase):
         self.assertEqual(steps["prepare-convoy"]["needs"], ["decompose"])
         self.assertEqual(steps["implement"]["needs"], ["prepare-convoy"])
         self.assertEqual(steps["implement-same-session"]["needs"], ["prepare-convoy"])
-        self.assertEqual(steps["prepare-review"]["needs"], ["implement", "implement-same-session"])
+        self.assertEqual(
+            steps["summarize-implementation"]["needs"],
+            ["implement", "implement-same-session"],
+        )
+        self.assertEqual(
+            steps["prepare-review"]["needs"], ["summarize-implementation"]
+        )
         self.assertEqual(steps["review"]["needs"], ["prepare-review"])
         self.assertEqual(steps["repair-review"]["needs"], ["review"])
         self.assertEqual(steps["finalize"]["needs"], ["repair-review"])
