@@ -1966,14 +1966,14 @@ class FormulaAssetTests(unittest.TestCase):
             "code_review.test_evidence_verdict=approve",
             "code_review.simplicity_verdict=approve",
             "gc bd update \"$CLAIMED_BEAD_ID\"",
-            "source anchor/worktree",
-            "launcher rig root may remain unchanged",
-            "not to the launcher rig root",
-            "normalized `gc.build.review.v1` artifact with `status: approved`",
+            "canonical integration worktree",
+            "integrated branch and commit",
+            "gc.build.integration_status=integrated",
+            "normalized `review-report.md`",
             "Do not invoke provider-native subagents",
-            "Implementation Worktrees",
-            "`gc.work_dir` is the launcher rig root, not the implementation worktree",
-            "Do not inspect or edit the launcher checkout",
+            "Integrated Build",
+            "gc.build.integration_work_dir",
+            'cd "$INTEGRATION_WORKTREE"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, asset_text)
@@ -2030,15 +2030,17 @@ class FormulaAssetTests(unittest.TestCase):
             "`gc.build.implementation_summary_path`",
             "`implementation-summary.md`",
             "`gc.build.implementation-summary.v1`",
-            "source anchor/worktree",
-            "not a partial build",
-            "Use `status: approved`",
+            "`gc.build.integration_status=integrated`",
+            "`gc.build.integration_branch`",
+            "`gc.build.integration_commit`",
+            "blocked\nbuild",
         ):
             with self.subTest(asset="finalize", fragment=fragment):
                 self.assertIn(fragment, finalize_text)
         for fragment in (
-            "approved source anchor/worktree",
-            "Do not mark publish failed or downgrade the workflow",
+            "canonical integrated branch",
+            "gc.build.integration_status=integrated",
+            "Do not publish an isolated per-item",
             "preserving the approved build outcome",
             "Never set\n`gc.outcome=noop`",
             "--set-metadata 'gc.outcome=pass'",
@@ -2055,6 +2057,10 @@ class FormulaAssetTests(unittest.TestCase):
             "accepted requirement IDs",
             "source anchor ids",
             "per-item summary paths",
+            "Integrate every successful per-item commit",
+            "canonical integration worktree",
+            "cherry-pick",
+            "gc.outcome=fail",
         ):
             with self.subTest(asset="summarize-implementation", fragment=fragment):
                 self.assertIn(fragment, summary_text)
@@ -2129,6 +2135,29 @@ class FormulaAssetTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, fragment=fragment):
                     self.assertIn(fragment, text)
 
+    def test_build_finalizers_notify_the_operator_with_actionable_terminal_state(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        for formula_name in ("build-base", "build-from-review-base"):
+            with self.subTest(formula=formula_name):
+                formula = load_formula(root, formula_name)
+                self.assertEqual(formula["vars"]["notify"]["default"], "human")
+
+        for relative_path in (
+            "assets/workflows/build-base/finalize.md",
+            "assets/workflows/build-basic/finalize.md",
+            "assets/workflows/build-from-review-base/finalize.md",
+        ):
+            text = (root / relative_path).read_text(encoding="utf-8")
+            for fragment in (
+                'gc mail send "{{notify}}"',
+                "workflow root id",
+                "terminal outcome",
+                "remaining blocker",
+                "restart command",
+            ):
+                with self.subTest(asset=relative_path, fragment=fragment):
+                    self.assertIn(fragment, text)
+
     def test_build_basic_review_context_is_worktree_anchored(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
         workflow_dir = root / "assets" / "workflows" / "build-basic-review"
@@ -2153,8 +2182,10 @@ class FormulaAssetTests(unittest.TestCase):
 
         for fragment in (
             "gc.build.code_review_context_path",
-            "Implementation Worktrees",
-            "metadata.work_dir",
+            "Integrated Build",
+            "gc.build.integration_work_dir",
+            "gc.build.integration_branch",
+            "gc.build.integration_commit",
             "Do not write\nliteral command substitutions",
             r"rg -n '\$\((cat|date)'",
         ):
@@ -2170,13 +2201,10 @@ class FormulaAssetTests(unittest.TestCase):
         ):
             with self.subTest(asset=asset_name, fragment="context path"):
                 self.assertIn("gc.build.code_review_context_path", text)
-            with self.subTest(asset=asset_name, fragment="worktree section"):
-                self.assertIn("Implementation Worktrees", text)
-            with self.subTest(asset=asset_name, fragment="launcher root"):
-                self.assertIn(
-                    "`gc.work_dir` is the launcher rig root, not the implementation worktree",
-                    text,
-                )
+            with self.subTest(asset=asset_name, fragment="integrated build"):
+                self.assertIn("Integrated Build", text)
+            with self.subTest(asset=asset_name, fragment="integration worktree"):
+                self.assertIn("gc.build.integration_work_dir", text)
 
         for asset_name, text in (
             ("acceptance", acceptance),
@@ -2184,13 +2212,13 @@ class FormulaAssetTests(unittest.TestCase):
             ("simplicity", simplicity),
             ("apply", apply),
         ):
-            with self.subTest(asset=asset_name, fragment="cd worktree"):
-                self.assertIn('cd "$WORKTREE"', text)
+            with self.subTest(asset=asset_name, fragment="cd integration worktree"):
+                self.assertIn('cd "$INTEGRATION_WORKTREE"', text)
             with self.subTest(asset=asset_name, fragment="pwd verification"):
                 self.assertIn("pwd -P", text)
 
-        self.assertIn("do not patch the launcher root", apply)
-        self.assertIn("source anchor and implementation\nworktree", synthesize)
+        self.assertIn("patch only the canonical integration worktree", apply)
+        self.assertIn("integrated branch and commit", synthesize)
     def test_build_artifact_prompts_use_set_metadata_for_paths(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
         path_contracts = {
@@ -3610,6 +3638,8 @@ class FormulaAssetTests(unittest.TestCase):
             "worktrees/<source-anchor-id>",
             "git worktree add",
             "gc bd update <source-anchor-id> --set-metadata work_dir=",
+            "Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open",
+            "before closing this prepare step",
             "Do not edit source files in the launcher checkout",
         ):
             with self.subTest(step="prepare-worktree", fragment=fragment):
@@ -4639,6 +4669,43 @@ description = "Override sink that writes the base triage report contract."
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("build artifact valid", result.stdout)
+
+    def test_build_artifact_check_works_when_python_user_site_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            artifact = pathlib.Path(artifact_dir) / "requirements.md"
+            control = (
+                '[{"id": "loop", "metadata": {'
+                '"gc.root_bead_id": "root", '
+                '"gc.build.artifact_schema": "gc.build.requirements.v1", '
+                '"gc.build.artifact_path_keys": "gc.build.requirements_path"}}]'
+            )
+            root_bead = (
+                '[{"id": "root", "metadata": {'
+                f'"gc.build.requirements_path": "{artifact}"'
+                "}}]"
+            )
+
+            artifact.write_text(self._valid_requirements_artifact(), encoding="utf-8")
+            valid = self._run_build_artifact_check(
+                {"loop": control, "root": root_bead},
+                "loop",
+                extra_env={"PYTHONNOUSERSITE": "1"},
+            )
+
+            artifact.write_text(
+                self._valid_requirements_artifact().replace("status: approved", "status: bogus"),
+                encoding="utf-8",
+            )
+            invalid = self._run_build_artifact_check(
+                {"loop": control, "root": root_bead},
+                "loop",
+                extra_env={"PYTHONNOUSERSITE": "1"},
+            )
+
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        self.assertIn("build artifact valid", valid.stdout)
+        self.assertNotEqual(invalid.returncode, 0, invalid.stdout + invalid.stderr)
+        self.assertIn("failed validation", invalid.stderr)
 
     def test_build_artifact_check_resolves_relative_path_from_rig_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -7,6 +7,17 @@ path is recorded on the workflow root bead as `gc.build.final_report_path`.
 Use `gc bd update "<workflow-root-id>" --set-metadata "gc.build.final_report_path=<absolute path>"`.
 Do not use `gc bd update --metadata 'key=value'`; `--metadata` only accepts a JSON
 object.
+After the final report validates locally and before closing this step, send one
+terminal notification unless `{{notify}}` is `none`. The message must include
+the workflow root id, terminal outcome, final report path, every remaining
+blocker id (or `none`), and an exact restart command (or `none`). Use:
+
+`gc mail send "{{notify}}" --subject "Build <workflow-root-id>: <terminal-outcome>" --message "workflow root id: <id>; terminal outcome: <outcome>; final report: <path>; remaining blocker ids: <ids-or-none>; restart command: <command-or-none>" --notify`
+
+Guard retries with `gc.build.terminal_mail_sent=true` on the workflow root: do
+not send when it is already true, and set it only after the send succeeds. A
+mail failure is a stage failure; do not silently close the workflow.
+
 Before closing this step, set the claimed step outcome with
 `gc bd update "<claimed-step-id>" --set-metadata "gc.outcome=pass"`, then close
 with `gc bd close "<claimed-step-id>" --reason "<concise reason>"`. Do not pass

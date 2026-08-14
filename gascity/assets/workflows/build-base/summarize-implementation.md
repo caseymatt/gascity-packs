@@ -28,6 +28,37 @@ read the requirements, decomposition, review context, and verification evidence
 before writing the canonical root summary. The canonical summary must cover all
 accepted requirement IDs that the build finalized.
 
+Integrate every successful per-item commit before writing the aggregate
+artifact. The canonical integration worktree is the absolute `gc.work_dir` on
+the workflow root. It must be an existing Git worktree on a named branch. Refuse
+to integrate into a detached HEAD or a worktree with unrelated tracked changes.
+Collect each source anchor's verified `gc.implementation.commit` in
+decomposition order. For each commit:
+
+1. Verify the commit exists and its per-item summary passed.
+2. Skip it only when it is already an ancestor of the canonical integration
+   worktree's `HEAD`.
+3. Otherwise, `cherry-pick` it into the canonical integration worktree.
+4. Resolve a conflict only when the approved plan and source summary make the
+   correct result unambiguous; then rerun the affected proof. Otherwise abort
+   the cherry-pick and stop as blocked.
+
+After all commits are integrated, run the aggregate proof commands from the
+canonical integration worktree. Record its absolute path, current branch, and
+exact `HEAD` on the workflow root as `gc.build.integration_work_dir`,
+`gc.build.integration_branch`, `gc.build.integration_commit`, and set
+`gc.build.integration_status=integrated`. The implementation summary's changed
+files and verification results must describe this integrated `HEAD`, not a
+collection of isolated worktrees.
+
+If any commit is missing, conflicts cannot be resolved, or aggregate proof
+fails, set `gc.build.integration_status=blocked`, `gc.blocked_reason`, and
+restart metadata on the workflow root, set this step to `gc.outcome=fail`, and
+do not write an approved summary. Before failing, notify `{{notify}}` unless it
+is `none`; include the workflow root id, failing commit or proof, remaining
+blocker ids, and exact restart command. A scattered set of successful
+per-item worktrees is not a completed build.
+
 Write the artifact as Markdown with YAML front matter, not JSON. Use mapping objects for front matter; do not use scalar shortcuts such as
 `workflow: build-basic`. The top-level YAML shape must be:
 

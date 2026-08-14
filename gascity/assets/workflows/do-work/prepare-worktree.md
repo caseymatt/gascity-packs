@@ -37,3 +37,9 @@ setup only. Do not edit source files in the launcher checkout.
    For synthetic drain-unit convoys, never persist `work_dir` on the synthetic drain-unit convoy; the original drain member/source anchor is authoritative.
    Verify the source anchor now has `work_dir` before closing this step with
    `gc.outcome=pass`.
+6. Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open
+   descendant carrying that root's `gc.root_bead_id`. Use the same absolute
+   source-anchor worktree for every stamp, then read the downstream
+   implementation step back and verify both keys equal that path. Complete this
+   before closing this prepare step and before an implementation worker can
+   claim the downstream step; stale launcher paths are a prepare failure.

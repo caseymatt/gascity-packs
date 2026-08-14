@@ -87,6 +87,10 @@ default = "false"
 description = "Set true to allow final PR creation after all checks pass."
 default = "false"
 
+[vars.notify]
+description = "Mailbox for terminal build notification; set to none to suppress."
+default = "human"
+
 [[steps]]
 id = "prepare-review"
 title = "Validate review continuation inputs"
