@@ -26,6 +26,12 @@ Launch inputs:
 
 Validate the target, artifact root, and optional context inputs. Record the normalized artifact paths on the workflow root bead so later stages can reuse them without inventing new locations.
 
+Mark the workflow root as owner-held before any planning, fan-out, or review work
+begins. Use
+`gc bd update "<workflow-root-id>" --add-label "owned"`.
+The owner-held label is a lifecycle contract: the controller completes workflow
+controls but leaves the root open for explicit owner inspection and closure.
+
 Validate mode inputs against the methodology vocabulary before any stage runs:
 `interaction_mode` must be `interactive`, `autonomous`, or `headless`;
 `review_mode` must be `report`, `agent`, or `interactive`; `drain_policy` must

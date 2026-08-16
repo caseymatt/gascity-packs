@@ -115,14 +115,11 @@ for candidate in \
 done
 [ -n "$VALIDATOR" ] || fail "validate_build_artifact.py not found beside $SCRIPT_DIR or under GC_WORK_DIR"
 
-USER_SITE="$(python3 -c 'import os, site; value = site.getusersitepackages(); print(os.pathsep.join(value) if isinstance(value, list) else value)')" ||
-  fail "python3 could not resolve its user site-packages directory"
-VALIDATOR_PYTHONPATH="$USER_SITE"
-if [ -n "${PYTHONPATH:-}" ]; then
-  VALIDATOR_PYTHONPATH="$VALIDATOR_PYTHONPATH:$PYTHONPATH"
-fi
+VENDOR_DIR="$SCRIPT_DIR/../vendor"
+[ -f "$VENDOR_DIR/yaml/__init__.py" ] ||
+  fail "vendored PyYAML runtime not found under $VENDOR_DIR"
 
-if OUTPUT="$(PYTHONPATH="$VALIDATOR_PYTHONPATH" python3 "$VALIDATOR" --schema "$SCHEMA" --path "$ARTIFACT_PATH" 2>&1)"; then
+if OUTPUT="$(PYTHONPATH="$VENDOR_DIR" python3 -S "$VALIDATOR" --schema "$SCHEMA" --path "$ARTIFACT_PATH" 2>&1)"; then
   echo "build artifact valid: schema=$SCHEMA path=$ARTIFACT_PATH"
   exit 0
 fi

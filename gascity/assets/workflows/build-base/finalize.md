@@ -25,4 +25,11 @@ with `gc bd close "<claimed-step-id>" --reason "<concise reason>"`. Do not pass
 
 Close this step only after the workflow root bead has the final outcome metadata needed by publish.
 
+Do not close the workflow root. Its `owned` label keeps it open after the
+workflow controls complete so delivery, publish, and merge evidence remain
+independently inspectable. Record `gc run status <workflow-root-id>` in the final
+report as the inspection command. After that status shows the intended terminal
+evidence, the owner closes the workflow root explicitly with
+`gc bd close "<workflow-root-id>" --reason "<evidence-backed reason>"`.
+
 Artifact validation: this stage is gated by `.gc/scripts/checks/build-artifact-valid.sh`, which validates the artifact recorded at `gc.build.final_report_path` against schema `gc.build.final-report.v1`. On repair attempts (`gc.attempt` greater than 1), read the validator errors from `gc.attempt_log` on the validation loop control bead (the dependent of this step bead) and repair the artifact in place instead of rewriting it. Two bounded repair attempts follow the first failure; exhausting them closes this stage with `gc.outcome=fail` and machine-readable validation errors that block downstream stages. Never ask questions in headless mode; record unresolved ambiguity inside the artifact.

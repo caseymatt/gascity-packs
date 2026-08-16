@@ -4,6 +4,8 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import sys
 import subprocess
 import tempfile
 import tomllib
@@ -1933,6 +1935,53 @@ class FormulaAssetTests(unittest.TestCase):
         ):
             with self.subTest(step="decompose", fragment=fragment):
                 self.assertIn(fragment, decompose_description)
+
+    def test_build_basic_holds_workflow_root_for_owner_close(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        data = resolve_formula(root, "build-basic")
+        prepare = next(step for step in data["steps"] if step["id"] == "prepare")
+        finalize = next(step for step in data["steps"] if step["id"] == "finalize")
+        prepare_description = node_description(root, prepare)
+        finalize_description = node_description(root, finalize)
+
+        self.assertIn(
+            'gc bd update "<workflow-root-id>" --add-label "owned"',
+            prepare_description,
+        )
+        for fragment in (
+            "Do not close the workflow root",
+            "gc run status <workflow-root-id>",
+            "owner",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, finalize_description)
+
+    def test_build_basic_publish_records_terminal_delivery_evidence(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        data = resolve_formula(root, "build-basic")
+        publish = next(step for step in data["steps"] if step["id"] == "publish")
+        description = node_description(root, publish)
+
+        for fragment in (
+            "gc.build.publish_status",
+            "gc.build.publish_action",
+            "gc.build.publish_recorded_at",
+            "gc.build.publish_artifact_path",
+            "gc.build.publish_reason",
+            "gc.build.publish_remote_status",
+            "gc.build.published_commit",
+            "pr_url",
+            "pr_number",
+            "workflow root bead",
+            "publish step",
+            "remote",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, description)
+        self.assertLess(
+            description.index("gc.build.publish_status"),
+            description.rindex("Close only after"),
+        )
 
     def test_build_basic_v2_uses_approachable_factory_techniques(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
@@ -4240,6 +4289,7 @@ description = "Override sink that writes the base triage report contract."
         bead_id: str,
         extra_env: dict[str, str] | None = None,
         script_root: pathlib.Path | None = None,
+        hermetic_python: bool = False,
     ) -> subprocess.CompletedProcess:
         root = pathlib.Path(__file__).resolve().parents[1]
         script = root / "assets" / "scripts" / "checks" / "build-artifact-valid.sh"
@@ -4253,6 +4303,10 @@ description = "Override sink that writes the base triage report contract."
             validator = root / "assets" / "scripts" / "validate_build_artifact.py"
             (installed_check_dir.parent / validator.name).write_text(
                 validator.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            shutil.copytree(
+                root / "assets" / "scripts" / "vendor",
+                installed_check_dir.parent / "vendor",
             )
             script = installed_script
 
@@ -4278,6 +4332,16 @@ description = "Override sink that writes the base triage report contract."
                 encoding="utf-8",
             )
             fake_gc.chmod(0o755)
+            if hermetic_python:
+                fake_python = bin_dir / "python3"
+                fake_python.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "set -euo pipefail\n"
+                    'case "$*" in *getusersitepackages*|*"import os, pwd"*) exit 97 ;; esac\n'
+                    f'exec "{sys.executable}" -S "$@"\n',
+                    encoding="utf-8",
+                )
+                fake_python.chmod(0o755)
 
             env = {
                 **os.environ,
@@ -4707,10 +4771,15 @@ description = "Override sink that writes the base triage report contract."
             )
 
             artifact.write_text(self._valid_requirements_artifact(), encoding="utf-8")
+            controller_env = {
+                "HOME": str(pathlib.Path(artifact_dir) / "city"),
+                "PYTHONNOUSERSITE": "1",
+            }
             valid = self._run_build_artifact_check(
                 {"loop": control, "root": root_bead},
                 "loop",
-                extra_env={"PYTHONNOUSERSITE": "1"},
+                extra_env=controller_env,
+                hermetic_python=True,
             )
 
             artifact.write_text(
@@ -4720,7 +4789,8 @@ description = "Override sink that writes the base triage report contract."
             invalid = self._run_build_artifact_check(
                 {"loop": control, "root": root_bead},
                 "loop",
-                extra_env={"PYTHONNOUSERSITE": "1"},
+                extra_env=controller_env,
+                hermetic_python=True,
             )
 
         self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
