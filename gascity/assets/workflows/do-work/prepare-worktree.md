@@ -33,10 +33,10 @@ setup only. Do not edit source files in the launcher checkout.
      `git worktree add "$WORKTREE" --detach "origin/$DEFAULT_BRANCH"`.
    If the path exists but is not the worktree for this repository, fail closed.
 5. Before publishing the worktree, set `RIG_ROOT=$(pwd -P)` and copy the
-   launcher rig's `.gc/scripts` and `schemas` trees into `$WORKTREE/.gc`:
+   launcher rig's `.gc/scripts` and `.gc/schemas` trees into `$WORKTREE/.gc`:
    `mkdir -p "$WORKTREE/.gc/scripts" "$WORKTREE/.gc/schemas"`,
    `cp -a "$RIG_ROOT/.gc/scripts/." "$WORKTREE/.gc/scripts/"`, and
-   `cp -a "$RIG_ROOT/schemas/." "$WORKTREE/.gc/schemas/"`.
+   `cp -a "$RIG_ROOT/.gc/schemas/." "$WORKTREE/.gc/schemas/"`.
    Hard-fail if either source tree is absent. Then verify
    `.gc/scripts/checks/build-artifact-valid.sh` and `.gc/schemas/build` exist
    under

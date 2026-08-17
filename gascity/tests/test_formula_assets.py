@@ -3714,7 +3714,7 @@ class FormulaAssetTests(unittest.TestCase):
             "Do not edit source files in the launcher checkout",
             "set `RIG_ROOT=$(pwd -P)`",
             'cp -a "$RIG_ROOT/.gc/scripts/." "$WORKTREE/.gc/scripts/"',
-            'cp -a "$RIG_ROOT/schemas/." "$WORKTREE/.gc/schemas/"',
+            'cp -a "$RIG_ROOT/.gc/schemas/." "$WORKTREE/.gc/schemas/"',
             "`.gc/scripts/checks/build-artifact-valid.sh` and `.gc/schemas/build` exist",
         ):
             with self.subTest(step="prepare-worktree", fragment=fragment):
