@@ -3713,8 +3713,8 @@ class FormulaAssetTests(unittest.TestCase):
             "Do not edit source files in the launcher checkout",
             "set `RIG_ROOT=$(pwd -P)`",
             'cp -a "$RIG_ROOT/.gc/scripts/." "$WORKTREE/.gc/scripts/"',
-            'cp -a "$RIG_ROOT/schemas/." "$WORKTREE/schemas/"',
-            "`.gc/scripts/checks/build-artifact-valid.sh` and `schemas/build` exist",
+            'cp -a "$RIG_ROOT/schemas/." "$WORKTREE/.gc/schemas/"',
+            "`.gc/scripts/checks/build-artifact-valid.sh` and `.gc/schemas/build` exist",
         ):
             with self.subTest(step="prepare-worktree", fragment=fragment):
                 self.assertIn(fragment, prepare)
@@ -4801,6 +4801,36 @@ description = "Override sink that writes the base triage report contract."
         self.assertIn("build artifact valid", valid.stdout)
         self.assertNotEqual(invalid.returncode, 0, invalid.stdout + invalid.stderr)
         self.assertIn("failed validation", invalid.stderr)
+
+    def test_build_artifact_check_uses_hidden_installed_schema_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = pathlib.Path(td)
+            rig_root = tmp / "rig"
+            artifact = tmp / "requirements.md"
+            artifact.write_text(self._valid_requirements_artifact(), encoding="utf-8")
+            source_root = pathlib.Path(__file__).resolve().parents[1]
+            shutil.copytree(source_root / "schemas", rig_root / ".gc" / "schemas")
+            control = (
+                '[{"id": "loop", "metadata": {'
+                '"gc.root_bead_id": "root", '
+                '"gc.build.artifact_schema": "gc.build.requirements.v1", '
+                '"gc.build.artifact_path_keys": "gc.build.requirements_path"}}]'
+            )
+            root_bead = (
+                '[{"id": "root", "metadata": {'
+                f'"gc.build.requirements_path": "{artifact}"'
+                "}}]"
+            )
+
+            result = self._run_build_artifact_check(
+                {"loop": control, "root": root_bead},
+                "loop",
+                extra_env={"GC_WORK_DIR": ""},
+                script_root=rig_root,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("build artifact valid", result.stdout)
 
     def test_build_artifact_check_resolves_relative_path_from_rig_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:
