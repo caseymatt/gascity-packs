@@ -3711,6 +3711,10 @@ class FormulaAssetTests(unittest.TestCase):
             "Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open",
             "before closing this prepare step",
             "Do not edit source files in the launcher checkout",
+            "set `RIG_ROOT=$(pwd -P)`",
+            'cp -a "$RIG_ROOT/.gc/scripts/." "$WORKTREE/.gc/scripts/"',
+            'cp -a "$RIG_ROOT/schemas/." "$WORKTREE/schemas/"',
+            "`.gc/scripts/checks/build-artifact-valid.sh` and `schemas/build` exist",
         ):
             with self.subTest(step="prepare-worktree", fragment=fragment):
                 self.assertIn(fragment, prepare)

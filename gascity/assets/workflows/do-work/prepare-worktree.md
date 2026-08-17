@@ -32,12 +32,22 @@ setup only. Do not edit source files in the launcher checkout.
    - Create the worktree detached at the freshly fetched tip:
      `git worktree add "$WORKTREE" --detach "origin/$DEFAULT_BRANCH"`.
    If the path exists but is not the worktree for this repository, fail closed.
-5. Persist the absolute path on the source anchor with
+5. Before publishing the worktree, set `RIG_ROOT=$(pwd -P)` and copy the
+   launcher rig's `.gc/scripts` and `schemas` trees into the same relative
+   paths under `$WORKTREE`:
+   `mkdir -p "$WORKTREE/.gc/scripts" "$WORKTREE/schemas"`,
+   `cp -a "$RIG_ROOT/.gc/scripts/." "$WORKTREE/.gc/scripts/"`, and
+   `cp -a "$RIG_ROOT/schemas/." "$WORKTREE/schemas/"`.
+   Hard-fail if either source tree is absent. Then verify
+   `.gc/scripts/checks/build-artifact-valid.sh` and `schemas/build` exist under
+   `$WORKTREE`; downstream controller checks execute from that isolated
+   worktree and must not depend on files outside it.
+6. Persist the absolute path on the source anchor with
    `gc bd update <source-anchor-id> --set-metadata work_dir=<absolute worktree path>`.
    For synthetic drain-unit convoys, never persist `work_dir` on the synthetic drain-unit convoy; the original drain member/source anchor is authoritative.
    Verify the source anchor now has `work_dir` before closing this step with
    `gc.outcome=pass`.
-6. Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open
+7. Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open
    descendant carrying that root's `gc.root_bead_id`. Use the same absolute
    source-anchor worktree for every stamp, then read the downstream
    implementation step back and verify both keys equal that path. Complete this
