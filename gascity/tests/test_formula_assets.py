@@ -3667,6 +3667,7 @@ class FormulaAssetTests(unittest.TestCase):
             "validate that input bead is a convoy",
             "do not search repo, plan, report, artifact, session-log, or runtime files",
             "hard-fail if metadata is missing",
+            "record the absolute launcher rig root as `gc.work_dir`",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, node_description(root, prepare))
