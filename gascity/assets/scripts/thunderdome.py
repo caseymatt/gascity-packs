@@ -478,6 +478,7 @@ def project_state(
             violations.append(
                 _violation("epoch_release_sha_mismatch", epoch_id, "release SHA does not match verified SHA")
             )
+        repair_beads = metadata.get(PREFIX + "repair_bead_ids", [])
         history = metadata.get(HISTORY, [])
         epoch_views.append(
             {
@@ -491,6 +492,8 @@ def project_state(
                 "target_ref": metadata.get(PREFIX + "target_ref", ""),
                 "candidate_count": len(candidate_ids) if isinstance(candidate_ids, list) else 0,
                 "transition_count": len(history) if isinstance(history, list) else 0,
+                "failure_class": metadata.get(PREFIX + "failure_class", ""),
+                "repair_bead_count": len(repair_beads) if isinstance(repair_beads, list) else 0,
                 "age_seconds": _age_seconds(metadata.get(PREFIX + "created_at"), now),
             }
         )
@@ -550,7 +553,8 @@ def format_status(projection: Mapping[str, Any]) -> str:
         "Thunderdome: " + ("healthy" if projection["ok"] else "invariant violation"),
         (
             "Queue: "
-            f"queued={queue['queued']} frozen={queue['frozen']} landed={queue['landed']} "
+            f"queued={queue['queued']} stale={queue['stale_queued']} "
+            f"frozen={queue['frozen']} landed={queue['landed']} "
             f"verified={queue['verified']} total={queue['total']}"
         ),
         f"Active epochs: {len(projection['active_epochs'])}",
@@ -558,6 +562,7 @@ def format_status(projection: Mapping[str, Any]) -> str:
     for epoch in projection["active_epochs"]:
         lines.append(
             f"- {epoch['id']}: state={epoch['state']} candidates={epoch['candidate_count']} "
+            f"repairs={epoch['repair_bead_count']} failure={epoch['failure_class'] or 'none'} "
             f"transitions={epoch['transition_count']} age={epoch['age_seconds']}s"
         )
     release = projection["release"]

@@ -320,6 +320,12 @@ class ProjectionTests(unittest.TestCase):
                 ("verifying", {}),
                 ("verified", {"verified_sha": LANDED_SHA, "verification_ref": "artifact://gate"}),
             ],
+            "repairing": [
+                ("landed", {"landed_sha": LANDED_SHA}),
+                ("verifying", {}),
+                ("red", {"failure_class": "test_failure", "evidence_ref": "artifact://red"}),
+                ("repairing", {"repair_bead_ids": ["sp-repair-a", "sp-repair-b"]}),
+            ],
             "promoted": [
                 ("landed", {"landed_sha": LANDED_SHA}),
                 ("verifying", {}),
@@ -346,6 +352,23 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(result["active_epochs"][0]["id"], "sp-epoch-a")
         self.assertEqual(result["active_epochs"][0]["transition_count"], 1)
         self.assertEqual(result["violations"], [])
+
+    def test_projection_exposes_repair_progress_without_failure_content(self) -> None:
+        candidate = self.candidate_record(state="frozen")
+        candidate["metadata"] = self.module.transition_metadata(
+            candidate["metadata"], "landed", now=LATER, evidence={}
+        )
+        result = self.module.project_state(
+            [candidate, self.epoch_record(state="repairing")],
+            now=LATER,
+            source_states={"sp-source-a": "in_progress"},
+        )
+
+        epoch = result["active_epochs"][0]
+        self.assertEqual(epoch["state"], "repairing")
+        self.assertEqual(epoch["repair_bead_count"], 2)
+        self.assertEqual(epoch["failure_class"], "test_failure")
+        self.assertNotIn("artifact://red", self.module.format_status(result))
 
     def test_projection_surfaces_stale_queued_candidates_without_failing_health(self) -> None:
         result = self.module.project_state(
@@ -436,6 +459,7 @@ class ProjectionTests(unittest.TestCase):
         output = self.module.format_status(result)
 
         self.assertIn("Queue: queued=1", output)
+        self.assertIn("stale=0", output)
         self.assertIn("Invariant violations: 0", output)
         self.assertNotIn("summary.json", output)
         self.assertNotIn("review.json", output)
