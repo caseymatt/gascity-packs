@@ -530,6 +530,119 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("close source beads", promote.lower())
         self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py candidate enqueue", enqueue)
 
+
+class ReconcilePlannerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_module()
+
+    def candidate(self, bead_id: str, created_at: str, *, base_sha: str = BASE_SHA):
+        return {
+            "id": bead_id,
+            "created_at": created_at,
+            "metadata": self.module.new_candidate_metadata(
+                source_beads=[f"source-{bead_id}"],
+                delivery_unit=f"delivery-{bead_id}",
+                commit=COMMIT_SHA,
+                base_sha=base_sha,
+                summary_path=f"/rig/.gc/artifacts/{bead_id}-summary.json",
+                review_path=f"/rig/.gc/artifacts/{bead_id}-review.json",
+                now=created_at,
+            ),
+        }
+
+    def test_oldest_wait_enqueues_a_bounded_epoch(self) -> None:
+        records = [
+            self.candidate("sp-candidate-b", "2026-08-18T12:40:00Z"),
+            self.candidate("sp-candidate-a", "2026-08-18T12:20:00Z"),
+            self.candidate("sp-stale", "2026-08-18T12:10:00Z", base_sha=REPAIR_SHA),
+        ]
+
+        plan = self.module.plan_reconcile(
+            records,
+            now=NOW,
+            trunk_sha=BASE_SHA,
+            max_depth=8,
+            max_age_seconds=1800,
+        )
+
+        self.assertTrue(plan["due"])
+        self.assertEqual(plan["reason"], "oldest_age")
+        self.assertEqual(plan["candidate_ids"], ["sp-candidate-a", "sp-candidate-b"])
+        self.assertEqual(plan["stale_candidate_ids"], ["sp-stale"])
+
+    def test_active_epoch_blocks_duplicate_dispatch(self) -> None:
+        epoch = {
+            "id": "sp-epoch-a",
+            "metadata": self.module.new_epoch_metadata(
+                candidate_ids=["sp-candidate-a"],
+                base_sha=BASE_SHA,
+                target_ref="refs/heads/main",
+                now=NOW,
+            ),
+        }
+        plan = self.module.plan_reconcile(
+            [self.candidate("sp-candidate-a", NOW), epoch],
+            now=LATER,
+            trunk_sha=BASE_SHA,
+            max_depth=1,
+            max_age_seconds=1800,
+        )
+
+        self.assertFalse(plan["due"])
+        self.assertEqual(plan["reason"], "active_epoch")
+        self.assertEqual(plan["active_epoch_ids"], ["sp-epoch-a"])
+
+    def test_reconcile_resumes_an_undispatched_assembling_epoch(self) -> None:
+        candidate = self.candidate("sp-candidate-a", NOW)
+        candidate["metadata"] = self.module.transition_metadata(
+            candidate["metadata"], "frozen", now=NOW, evidence={"epoch_id": "sp-epoch-a"}
+        )
+        epoch = {
+            "id": "sp-epoch-a",
+            "metadata": self.module.new_epoch_metadata(
+                candidate_ids=["sp-candidate-a"],
+                base_sha=BASE_SHA,
+                target_ref="refs/heads/main",
+                now=NOW,
+            ),
+        }
+        calls = []
+
+        class Client:
+            def list_thunderdome(_self):
+                return [candidate, epoch]
+
+            def run(_self, args):
+                calls.append(list(args))
+                return {"workflow_id": "sp-workflow-a"}
+
+            def update_metadata(_self, bead_id, metadata):
+                self.assertEqual(bead_id, "sp-epoch-a")
+                self.assertEqual(
+                    metadata["gc.thunderdome.workflow_id"], "sp-workflow-a"
+                )
+                return {"id": bead_id, "metadata": metadata}
+
+        args = self.module.argparse.Namespace(
+            rig="sprocket",
+            now=LATER,
+            trunk_sha=BASE_SHA,
+            max_depth=8,
+            max_age_seconds=1800,
+            dry_run=False,
+            full_gate_command="just ci",
+            operator="gc.run-operator",
+            target_ref="refs/heads/main",
+        )
+        result = self.module.reconcile(Client(), args)
+
+        self.assertEqual(result["action"], "dispatched")
+        self.assertEqual(result["workflow_id"], "sp-workflow-a")
+        self.assertEqual(calls[0][:4], ["sling", "sprocket/gc.run-operator", "sp-epoch-a", "--on"])
+        self.assertIn("full_gate_command=just ci", calls[0])
+
+
 class AdapterTests(unittest.TestCase):
     @classmethod
 
@@ -627,6 +740,11 @@ class CommandExtensionTests(unittest.TestCase):
         self.assertIn("Manage and observe Continuous Thunderdome state", result.stdout)
         self.assertIn("candidate", result.stdout)
         self.assertIn("epoch", result.stdout)
+        self.assertIn("reconcile", result.stdout)
+        result_schema = json.loads(
+            (command_dir / "schemas" / "result.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(result_schema["properties"]["schema_version"]["const"], "1")
         self.assertEqual(
             manifest["description"],
             "Observe and operate Continuous Thunderdome state",

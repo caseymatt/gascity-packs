@@ -547,6 +547,82 @@ def project_state(
     }
 
 
+
+def plan_reconcile(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    now: str,
+    trunk_sha: str,
+    max_depth: int,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    exact_trunk = require_sha("trunk_sha", trunk_sha)
+    if max_depth < 1:
+        raise StateError("max_depth must be at least 1")
+    if max_age_seconds < 0:
+        raise StateError("max_age_seconds must not be negative")
+    _parse_time(now)
+
+    active_epoch_ids = sorted(
+        str(record.get("id", ""))
+        for record in records
+        if (record.get("metadata") or {}).get(PREFIX + "schema") == SCHEMA
+        and (record.get("metadata") or {}).get(KIND) == "epoch"
+        and (record.get("metadata") or {}).get(STATE) not in TERMINAL_EPOCH_STATES
+    )
+    queued: list[tuple[int, str]] = []
+    stale_candidate_ids: list[str] = []
+    for record in records:
+        metadata = record.get("metadata") or {}
+        if (
+            metadata.get(PREFIX + "schema") != SCHEMA
+            or metadata.get(KIND) != "candidate"
+            or metadata.get(STATE) != "queued"
+        ):
+            continue
+        candidate_id = str(record.get("id", ""))
+        if metadata.get(PREFIX + "base_sha") != exact_trunk:
+            stale_candidate_ids.append(candidate_id)
+            continue
+        age_seconds = _age_seconds(metadata.get(PREFIX + "created_at"), now)
+        queued.append((age_seconds if age_seconds is not None else -1, candidate_id))
+
+    queued.sort(key=lambda item: (-item[0], item[1]))
+    candidate_ids = [candidate_id for _, candidate_id in queued[:max_depth]]
+    oldest_age_seconds = queued[0][0] if queued else None
+    if active_epoch_ids:
+        due = False
+        reason = "active_epoch"
+        candidate_ids = []
+    elif len(queued) >= max_depth:
+        due = True
+        reason = "queue_depth"
+    elif queued and oldest_age_seconds is not None and oldest_age_seconds >= max_age_seconds:
+        due = True
+        reason = "oldest_age"
+    elif queued:
+        due = False
+        reason = "waiting"
+        candidate_ids = []
+    else:
+        due = False
+        reason = "no_ready_candidates"
+
+    return {
+        "schema_version": "1",
+        "due": due,
+        "reason": reason,
+        "candidate_ids": candidate_ids,
+        "active_epoch_ids": active_epoch_ids,
+        "stale_candidate_ids": sorted(stale_candidate_ids),
+        "ready_count": len(queued),
+        "oldest_ready_seconds": oldest_age_seconds,
+        "max_depth": max_depth,
+        "max_age_seconds": max_age_seconds,
+        "trunk_sha": exact_trunk,
+    }
+
+
 def format_status(projection: Mapping[str, Any]) -> str:
     queue = projection["queue"]
     lines = [
@@ -859,6 +935,89 @@ def read_projection(client: BeadClient, now: str, trunk_sha: str = "") -> dict[s
     )
 
 
+
+def _dispatch_epoch(client: BeadClient, args: argparse.Namespace, epoch: Mapping[str, Any]) -> dict[str, Any]:
+    if not args.rig:
+        raise StateError("--rig is required to dispatch an epoch")
+    if not args.full_gate_command:
+        raise StateError("--full-gate-command is required to dispatch an epoch")
+    metadata = epoch.get("metadata") or {}
+    candidate_ids = require_nonempty_ids(
+        "candidate_ids", metadata.get(PREFIX + "candidate_ids", [])
+    )
+    operator = args.operator if "/" in args.operator else f"{args.rig}/{args.operator}"
+    response = client.run(
+        [
+            "sling",
+            operator,
+            str(epoch["id"]),
+            "--on",
+            "thunderdome-land",
+            "--var",
+            f"candidate_ids={','.join(candidate_ids)}",
+            "--var",
+            f"base_sha={metadata.get(PREFIX + 'base_sha', '')}",
+            "--var",
+            f"target_ref={args.target_ref}",
+            "--var",
+            f"full_gate_command={args.full_gate_command}",
+            "--json",
+        ]
+    )
+    workflow_id = str(response.get("workflow_id") or response.get("bead_id") or "")
+    if not workflow_id:
+        raise CommandError("gc sling returned no workflow identifier")
+    updated_metadata = dict(metadata)
+    updated_metadata[PREFIX + "workflow_id"] = workflow_id
+    client.update_metadata(str(epoch["id"]), updated_metadata)
+    return {
+        "schema_version": "1",
+        "ok": True,
+        "action": "dispatched",
+        "epoch_id": str(epoch["id"]),
+        "workflow_id": workflow_id,
+        "candidate_ids": candidate_ids,
+    }
+
+
+def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
+    records = client.list_thunderdome()
+    plan = plan_reconcile(
+        records,
+        now=args.now or utc_now(),
+        trunk_sha=args.trunk_sha,
+        max_depth=args.max_depth,
+        max_age_seconds=args.max_age_seconds,
+    )
+    if plan["active_epoch_ids"]:
+        active = {
+            str(record.get("id", "")): record
+            for record in records
+            if str(record.get("id", "")) in plan["active_epoch_ids"]
+        }
+        if len(active) == 1:
+            epoch = active[plan["active_epoch_ids"][0]]
+            metadata = epoch.get("metadata") or {}
+            if metadata.get(STATE) == "assembling" and not metadata.get(PREFIX + "workflow_id"):
+                if args.dry_run:
+                    return {**plan, "ok": True, "action": "would_resume"}
+                return _dispatch_epoch(client, args, epoch)
+        return {**plan, "ok": True, "action": "none"}
+    if not plan["due"]:
+        return {**plan, "ok": True, "action": "none"}
+    if args.dry_run:
+        return {**plan, "ok": True, "action": "would_dispatch"}
+
+    epoch_args = argparse.Namespace(
+        candidate=plan["candidate_ids"],
+        base_sha=args.trunk_sha,
+        target_ref=args.target_ref,
+        now=args.now,
+    )
+    epoch = open_epoch(client, epoch_args)
+    return _dispatch_epoch(client, args, epoch)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage and observe Continuous Thunderdome state")
     parser.add_argument("--gc-bin", default="gc")
@@ -907,6 +1066,19 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true")
     status.add_argument("--trunk-sha", default="")
     status.add_argument("--fail-on-violation", action="store_true")
+
+    reconcile_command = subparsers.add_parser(
+        "reconcile", help="Dispatch one bounded epoch when queue depth or age is due"
+    )
+    reconcile_command.add_argument("--trunk-sha", required=True)
+    reconcile_command.add_argument("--max-depth", type=int, default=8)
+    reconcile_command.add_argument("--max-age-seconds", type=int, default=1800)
+    reconcile_command.add_argument("--target-ref", default="refs/heads/main")
+    reconcile_command.add_argument("--operator", default="gc.run-operator")
+    reconcile_command.add_argument("--full-gate-command", default="")
+    reconcile_command.add_argument("--now", default="")
+    reconcile_command.add_argument("--dry-run", action="store_true")
+    reconcile_command.add_argument("--json", action="store_true")
     return parser
 
 
@@ -921,6 +1093,8 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = subprocess_runne
             result = open_epoch(client, args)
         elif args.command == "epoch" and args.epoch_command == "transition":
             result = transition_epoch(client, args)
+        elif args.command == "reconcile":
+            result = reconcile(client, args)
         elif args.command == "status":
             projection = read_projection(client, args.now or utc_now(), args.trunk_sha)
             if args.json:

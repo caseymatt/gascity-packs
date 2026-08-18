@@ -5,9 +5,9 @@ Usage:
 ```text
 gc gc thunderdome [--rig <rig>] status [--json] [--trunk-sha <sha>] [--fail-on-violation]
 gc gc thunderdome [--rig <rig>] candidate enqueue ...
-gc gc thunderdome [--rig <rig>] candidate transition ...
 gc gc thunderdome [--rig <rig>] epoch open ...
 gc gc thunderdome [--rig <rig>] epoch transition ...
+gc gc thunderdome [--rig <rig>] reconcile --trunk-sha <sha> [--max-depth <n>] [--max-age-seconds <n>] [--full-gate-command <command>] [--dry-run] [--json]
 ```
 
 `status` is read-only. It reports queue depth and age, stale candidates, active
@@ -15,6 +15,12 @@ epoch state, repair progress, the latest promoted release SHA, and invariant
 violations. Pass the current trunk SHA to classify queued candidates whose base
 has gone stale. `--fail-on-violation` exits nonzero when typed ledger invariants
 are broken.
+
+`reconcile` is the bounded automatic trigger. It dispatches one immutable epoch
+when the ready queue reaches `--max-depth` or its oldest candidate reaches
+`--max-age-seconds`. An active epoch blocks duplicate dispatch. A retry resumes
+an assembling epoch whose workflow was not recorded. Use `--dry-run` to inspect
+the deterministic decision without freezing candidates.
 
 Mutation commands are infrastructure adapters used by the Thunderdome formulas.
 They validate legal transitions, seal epoch membership, emit low-cardinality
