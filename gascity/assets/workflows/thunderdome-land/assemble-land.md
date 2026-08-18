@@ -18,12 +18,18 @@ remove a member to obtain green.
 
 Push only the epoch branch. Derive the GitHub PR base branch by removing the
 validated `refs/heads/` prefix from `{{target_ref}}`; never pass a full ref where
-the GitHub API requires a branch name. Open exactly one aggregate PR, enable the
-repository's protected checks and merge queue or auto-merge, and wait on
-GitHub's event/check surface rather than a sleep loop.
-Never bypass branch protection or use a force push. If preflight or protected
-checks fail before merge, write a sanitized artifact, transition the epoch to
-`failed` with `failure_class` and `evidence_ref`, and fail this step.
+the GitHub API requires a branch name. Open exactly one aggregate PR and wait
+on GitHub's check/event surface rather than a sleep loop. Use branch protection
+and the merge queue when the repository exposes them.
+
+When the provider or account cannot protect this private branch, use the
+equivalent fail-closed path: require every configured PR check green, re-read
+the exact base and candidate head SHAs immediately before merge, and merge with
+`gh pr merge --match-head-commit <candidate-head-sha>`. Record the unavailable
+protection capability and all check/merge evidence. Never push directly to the
+target, force push, merge a changed head, or treat missing checks as success.
+On any preflight, check, or merge failure, write a sanitized artifact, transition
+the epoch to `failed` with `failure_class` and `evidence_ref`, and fail this step.
 
 After GitHub reports the PR merged, read the actual merge commit from GitHub,
 run `git fetch --no-tags origin "{{target_ref}}"`, resolve `FETCH_HEAD`, and

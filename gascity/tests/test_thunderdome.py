@@ -557,6 +557,8 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn('thunderdome.py --rig "${GC_RIG_NAME:?}"', freeze)
         self.assertNotIn("--epoch-id", assemble)
         self.assertNotIn("--state landed", assemble)
+        self.assertIn("--match-head-commit", assemble)
+        self.assertIn("equivalent fail-closed", assemble.lower())
 
 
 class ReconcilePlannerTests(unittest.TestCase):

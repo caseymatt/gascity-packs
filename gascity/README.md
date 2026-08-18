@@ -112,7 +112,9 @@ queue.
    into one epoch and dispatches `thunderdome-land`. An active epoch prevents a
    second dispatch.
 3. `thunderdome-land` merges every frozen candidate into one aggregate branch
-   and protected PR. The epoch is never bisected to obtain green.
+   and protected PR. Where the provider cannot protect a private branch, it
+   requires the equivalent fail-closed path: all configured checks green and a
+   merge guarded by the candidate head SHA. The epoch is never bisected.
 4. The repository's full-system gate runs against the actual merged trunk SHA.
    Aggregate failures create parallel fix-forward work, land as a repair PR,
    and restart verification from the new merged SHA.
