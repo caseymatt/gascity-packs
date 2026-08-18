@@ -3640,6 +3640,11 @@ class FormulaAssetTests(unittest.TestCase):
             "push {{push}}",
             "open_pr {{open_pr}}",
             "summary_path {{summary_path}}",
+            "gc.build.publish_status",
+            "gc.build.publish_action",
+            "gc.build.publish_reason",
+            "workflow root bead and the claimed publish bead",
+            "already published",
             "publish",
         ):
             with self.subTest(step="publish", fragment=fragment):
