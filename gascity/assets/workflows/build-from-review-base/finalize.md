@@ -24,6 +24,17 @@ Only record a passing terminal outcome when all prerequisite artifacts exist,
 implementation evidence is present, review is approved, and repair status is
 `not_needed` or `approved`.
 
+After the final report validates locally and before closing this step, send one
+terminal notification unless `{{notify}}` is `none`. The message must include
+the workflow root id, terminal outcome, final report path, every remaining
+blocker id (or `none`), and an exact restart command (or `none`). Use:
+
+`gc mail send "{{notify}}" --subject "Build <workflow-root-id>: <terminal-outcome>" --message "workflow root id: <id>; terminal outcome: <outcome>; final report: <path>; remaining blocker ids: <ids-or-none>; restart command: <command-or-none>" --notify`
+
+Guard retries with `gc.build.terminal_mail_sent=true` on the workflow root: do
+not send when it is already true, and set it only after the send succeeds. A
+mail failure is a stage failure; do not silently close the workflow.
+
 Record terminal outcome metadata on the workflow root before closing so the
 publish step can safely no-op, push, open a PR, or block with an explicit
 reason without changing the workflow outcome.

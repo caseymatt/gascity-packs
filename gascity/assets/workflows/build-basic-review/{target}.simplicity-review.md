@@ -6,14 +6,12 @@ maintenance risk. Keep this lane beginner-friendly: flag only concrete issues
 that a new factory user can understand and act on.
 
 Before inspecting files, read `gc.build.code_review_context_path` from the
-workflow root bead and use its `## Implementation Worktrees` section as the
-authority for code under review. `gc.work_dir` is the launcher rig root, not the
-implementation worktree. Do not inspect or edit the launcher checkout. Resolve
-relative file paths against the listed implementation worktree, run
-`cd "$WORKTREE"`, and verify `pwd -P` equals that worktree before running any
-command.
-
-Contract: `gc.work_dir` is the launcher rig root, not the implementation worktree.
+workflow root bead and use its `## Integrated Build` section as the authority
+for code under review. Resolve `INTEGRATION_WORKTREE` from
+`gc.build.integration_work_dir`, run `cd "$INTEGRATION_WORKTREE"`, and verify
+`pwd -P`, the named branch, and exact `HEAD` match the recorded integration
+evidence before running any command. Review the combined change on the
+integrated branch; per-item worktrees are provenance only.
 
 Write findings under the build artifact root. Required findings must be tied to
 specific changed files or artifacts and must explain the smallest useful fix.

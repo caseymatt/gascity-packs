@@ -7,11 +7,29 @@ path is recorded on the workflow root bead as `gc.build.final_report_path`.
 Use `gc bd update "<workflow-root-id>" --set-metadata "gc.build.final_report_path=<absolute path>"`.
 Do not use `gc bd update --metadata 'key=value'`; `--metadata` only accepts a JSON
 object.
+After the final report validates locally and before closing this step, send one
+terminal notification unless `{{notify}}` is `none`. The message must include
+the workflow root id, terminal outcome, final report path, every remaining
+blocker id (or `none`), and an exact restart command (or `none`). Use:
+
+`gc mail send "{{notify}}" --subject "Build <workflow-root-id>: <terminal-outcome>" --message "workflow root id: <id>; terminal outcome: <outcome>; final report: <path>; remaining blocker ids: <ids-or-none>; restart command: <command-or-none>" --notify`
+
+Guard retries with `gc.build.terminal_mail_sent=true` on the workflow root: do
+not send when it is already true, and set it only after the send succeeds. A
+mail failure is a stage failure; do not silently close the workflow.
+
 Before closing this step, set the claimed step outcome with
 `gc bd update "<claimed-step-id>" --set-metadata "gc.outcome=pass"`, then close
 with `gc bd close "<claimed-step-id>" --reason "<concise reason>"`. Do not pass
 `--metadata` or `--set-metadata` to `gc bd close`.
 
 Close this step only after the workflow root bead has the final outcome metadata needed by publish.
+
+Do not close the workflow root. Its `owned` label keeps it open after the
+workflow controls complete so delivery, publish, and merge evidence remain
+independently inspectable. Record `gc run status <workflow-root-id>` in the final
+report as the inspection command. After that status shows the intended terminal
+evidence, the owner closes the workflow root explicitly with
+`gc bd close "<workflow-root-id>" --reason "<evidence-backed reason>"`.
 
 Artifact validation: this stage is gated by `.gc/scripts/checks/build-artifact-valid.sh`, which validates the artifact recorded at `gc.build.final_report_path` against schema `gc.build.final-report.v1`. On repair attempts (`gc.attempt` greater than 1), read the validator errors from `gc.attempt_log` on the validation loop control bead (the dependent of this step bead) and repair the artifact in place instead of rewriting it. Two bounded repair attempts follow the first failure; exhausting them closes this stage with `gc.outcome=fail` and machine-readable validation errors that block downstream stages. Never ask questions in headless mode; record unresolved ambiguity inside the artifact.

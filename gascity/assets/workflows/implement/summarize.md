@@ -6,9 +6,11 @@ review loops. Publish settings are push {{push}} and open_pr {{open_pr}}.
 
 Write to summary_path {{summary_path}} when provided; otherwise use the default
 implementation summary path for the workflow run. Update workflow root metadata
-with `gc.implementation.summary_path=<absolute path>` so the optional publish
-step has an explicit report path to consume. Write the summary as a
-`gc.build.implementation-summary.v1` artifact.
+with both `gc.build.implementation_summary_path=<absolute path>` for the
+canonical run-status projection and
+`gc.implementation.summary_path=<absolute path>` for the publisher and
+validator. Write the summary as a `gc.build.implementation-summary.v1`
+artifact.
 The summary body must contain these exact schema-required `##` headings in this
 order:
 

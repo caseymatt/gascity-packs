@@ -28,6 +28,10 @@ Requirements:
 - inspect the convoy target branch, defaulting to the repo default branch
 - write a run-status artifact if summary_path {{summary_path}} or artifact root is provided
 - record push {{push}} and open_pr {{open_pr}}
+- resolve the absolute launcher rig root from `$GC_RIG_ROOT`, falling back to
+  `git rev-parse --show-toplevel`; verify it is an existing Git worktree on a
+  named branch, then record the absolute launcher rig root as `gc.work_dir` on
+  the current workflow root before closing this step
 
 Close pass only after no workflow roots, drain controls, routed beads,
 worktrees, refs, or publish records have been created before validation.

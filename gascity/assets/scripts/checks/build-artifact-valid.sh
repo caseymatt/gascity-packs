@@ -115,7 +115,11 @@ for candidate in \
 done
 [ -n "$VALIDATOR" ] || fail "validate_build_artifact.py not found beside $SCRIPT_DIR or under GC_WORK_DIR"
 
-if OUTPUT="$(python3 "$VALIDATOR" --schema "$SCHEMA" --path "$ARTIFACT_PATH" 2>&1)"; then
+VENDOR_DIR="$SCRIPT_DIR/../vendor"
+[ -f "$VENDOR_DIR/yaml/__init__.py" ] ||
+  fail "vendored PyYAML runtime not found under $VENDOR_DIR"
+
+if OUTPUT="$(PYTHONPATH="$VENDOR_DIR" python3 -S "$VALIDATOR" --schema "$SCHEMA" --path "$ARTIFACT_PATH" 2>&1)"; then
   echo "build artifact valid: schema=$SCHEMA path=$ARTIFACT_PATH"
   exit 0
 fi

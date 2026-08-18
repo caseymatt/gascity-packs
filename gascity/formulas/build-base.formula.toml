@@ -24,6 +24,7 @@ Launch inputs:
 - max_iterations: {{max_iterations}}
 - push: {{push}}
 - open_pr: {{open_pr}}
+- notify: {{notify}}
 """
 formula = "build-base"
 version = 1
@@ -109,6 +110,10 @@ default = "false"
 [vars.open_pr]
 description = "Set true to allow final PR creation after all checks pass."
 default = "false"
+
+[vars.notify]
+description = "Mailbox for terminal build notification; set to none to suppress."
+default = "human"
 
 [[steps]]
 id = "prepare"
