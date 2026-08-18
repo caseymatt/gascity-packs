@@ -640,6 +640,9 @@ class ReconcilePlannerTests(unittest.TestCase):
         class Client:
             def list_thunderdome(_self):
                 return [candidate, epoch]
+            def show(_self, _bead_ids):
+                return [{"id": "source-sp-candidate-a", "status": "in_progress"}]
+
 
             def run(_self, args):
                 calls.append(list(args))
@@ -664,11 +667,39 @@ class ReconcilePlannerTests(unittest.TestCase):
             target_ref="refs/heads/main",
         )
         result = self.module.reconcile(Client(), args)
-
         self.assertEqual(result["action"], "dispatched")
         self.assertEqual(result["workflow_id"], "sp-workflow-a")
         self.assertEqual(calls[0][:4], ["sling", "sprocket/gc.run-operator", "sp-epoch-a", "--on"])
         self.assertIn("full_gate_command=just ci", calls[0])
+
+
+    def test_reconcile_fails_closed_on_projection_invariants(self) -> None:
+        first = self.candidate("sp-candidate-a", NOW)
+        second = self.candidate("sp-candidate-b", NOW)
+        second["metadata"]["gc.thunderdome.source_beads"] = first["metadata"][
+            "gc.thunderdome.source_beads"
+        ]
+
+        class Client:
+            def list_thunderdome(_self):
+                return [first, second]
+
+            def show(_self, _bead_ids):
+                return [{"id": "source-sp-candidate-a", "status": "in_progress"}]
+
+        args = self.module.argparse.Namespace(
+            rig="sprocket",
+            now=LATER,
+            trunk_sha=BASE_SHA,
+            max_depth=8,
+            max_age_seconds=1800,
+            dry_run=True,
+            full_gate_command="just ci",
+            operator="gc.run-operator",
+            target_ref="refs/heads/main",
+        )
+        with self.assertRaisesRegex(self.module.StateError, "invariant"):
+            self.module.reconcile(Client(), args)
 
 
 class AdapterTests(unittest.TestCase):

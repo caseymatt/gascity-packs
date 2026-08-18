@@ -982,9 +982,32 @@ def _dispatch_epoch(client: BeadClient, args: argparse.Namespace, epoch: Mapping
 
 def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
     records = client.list_thunderdome()
+    now = args.now or utc_now()
+    source_ids = sorted(
+        {
+            source_id
+            for record in records
+            if (record.get("metadata") or {}).get(KIND) == "candidate"
+            for source_id in (record.get("metadata") or {}).get(PREFIX + "source_beads", [])
+        }
+    )
+    source_states = {
+        str(record["id"]): str(record.get("status", ""))
+        for record in client.show(source_ids)
+    }
+    projection = project_state(
+        records,
+        now=now,
+        source_states=source_states,
+        trunk_sha=args.trunk_sha,
+    )
+    if not projection["ok"]:
+        raise StateError(
+            f"refusing reconcile with {len(projection['violations'])} invariant violation(s)"
+        )
     plan = plan_reconcile(
         records,
-        now=args.now or utc_now(),
+        now=now,
         trunk_sha=args.trunk_sha,
         max_depth=args.max_depth,
         max_age_seconds=args.max_age_seconds,
