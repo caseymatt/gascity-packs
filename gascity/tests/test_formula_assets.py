@@ -3624,6 +3624,7 @@ class FormulaAssetTests(unittest.TestCase):
         self.assertEqual(data["steps"][5]["needs"], ["summarize"])
         summarize = node_description(root, data["steps"][4])
         self.assertIn("gc.implementation.summary_path", summarize)
+        self.assertIn("gc.build.implementation_summary_path", summarize)
         wait = node_description(root, data["steps"][3])
         for fragment in (
             "Wait only on the core drain control bead",
