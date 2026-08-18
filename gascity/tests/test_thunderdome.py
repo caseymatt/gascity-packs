@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import io
 import importlib.util
+import io
 import json
+import os
 import pathlib
-import sys
 import subprocess
-import unittest
+import sys
 import tomllib
+import unittest
 from contextlib import redirect_stdout
 
 
@@ -531,6 +532,7 @@ class FormulaContractTests(unittest.TestCase):
 
 class AdapterTests(unittest.TestCase):
     @classmethod
+
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
@@ -605,6 +607,31 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(result["ok"])
         self.assertEqual(result["queue"]["queued"], 1)
+
+
+class CommandExtensionTests(unittest.TestCase):
+    ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+    def test_pack_command_exposes_the_state_cli(self) -> None:
+        command_dir = self.ROOT / "commands" / "thunderdome"
+        manifest = tomllib.loads((command_dir / "command.toml").read_text(encoding="utf-8"))
+        result = subprocess.run(
+            [str(command_dir / "run.sh"), "--help"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GC_PACK_DIR": str(self.ROOT)},
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Manage and observe Continuous Thunderdome state", result.stdout)
+        self.assertIn("candidate", result.stdout)
+        self.assertIn("epoch", result.stdout)
+        self.assertEqual(
+            manifest["description"],
+            "Observe and operate Continuous Thunderdome state",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

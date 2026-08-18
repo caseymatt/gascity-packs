@@ -862,8 +862,8 @@ def read_projection(client: BeadClient, now: str, trunk_sha: str = "") -> dict[s
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage and observe Continuous Thunderdome state")
     parser.add_argument("--gc-bin", default="gc")
-    parser.add_argument("--city", default="")
-    parser.add_argument("--rig", default="")
+    parser.add_argument("--city", default=os.environ.get("GC_CITY_DIR", ""))
+    parser.add_argument("--rig", default=os.environ.get("GC_RIG_NAME", os.environ.get("GC_RIG", "")))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     candidate = subparsers.add_parser("candidate", help="Manage land candidates")
