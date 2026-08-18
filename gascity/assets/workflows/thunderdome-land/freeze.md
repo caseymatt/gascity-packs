@@ -6,15 +6,16 @@ empty or duplicate IDs, and read every candidate from the task store. Require
 approved summary/review, exact commits, identical base SHA `{{base_sha}}`, and
 no overlapping source beads.
 
-Fetch `origin/{{target_ref}}` and require its exact 40-character SHA still equals
-`{{base_sha}}`. If trunk moved, fail closed and leave candidates queued for
-explicit refresh/rebuild; never rebase or silently substitute a base.
+Run `git fetch --no-tags origin "{{target_ref}}"`, resolve `FETCH_HEAD`, and
+require its exact 40-character SHA still equals `{{base_sha}}`. If trunk moved,
+fail closed and leave candidates queued for explicit refresh/rebuild; never
+rebase or silently substitute a base.
 
 Open the epoch only through the installed state adapter:
 
 ```bash
-{{pack_root}}/assets/scripts/thunderdome.py epoch open \
-  --rig "${GC_RIG_NAME:?}" \
+{{pack_root}}/assets/scripts/thunderdome.py --rig "${GC_RIG_NAME:?}" \
+  epoch open \
   --base-sha "{{base_sha}}" \
   --target-ref "{{target_ref}}" \
   --candidate "<candidate-id>" [--candidate "<candidate-id>" ...] \

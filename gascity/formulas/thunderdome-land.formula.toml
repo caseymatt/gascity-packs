@@ -35,11 +35,11 @@ required = true
 
 [vars.target_ref]
 description = "Protected trunk branch receiving the aggregate epoch PR."
-default = "main"
+default = "refs/heads/main"
 
 [vars.release_ref]
 description = "Protected stable release branch or tag ref."
-default = "release/stable"
+default = "refs/heads/release/stable"
 
 [vars.full_gate_command]
 description = "Repository-defined full-system verification command."

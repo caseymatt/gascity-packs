@@ -514,6 +514,10 @@ class FormulaContractTests(unittest.TestCase):
         self.assertEqual(steps[2]["needs"], ["assemble-land"])
         self.assertEqual(steps[3]["needs"], ["verify-repair"])
         self.assertEqual(data["requires"]["formula_compiler"], ">=2.0.0")
+        self.assertEqual(data["vars"]["target_ref"]["default"], "refs/heads/main")
+        self.assertEqual(
+            data["vars"]["release_ref"]["default"], "refs/heads/release/stable"
+        )
 
     def test_agent_contracts_use_the_state_tool_and_fix_forward(self) -> None:
         freeze = self.prompt("thunderdome-land/freeze.md")
@@ -522,13 +526,35 @@ class FormulaContractTests(unittest.TestCase):
         promote = self.prompt("thunderdome-land/promote.md")
         enqueue = self.prompt("thunderdome-build/enqueue.md")
 
-        self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py epoch open", freeze)
-        self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py epoch transition", assemble)
+        self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py", freeze)
+        self.assertIn("epoch open", freeze)
+        self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py", assemble)
+        self.assertIn("epoch transition", assemble)
         self.assertIn("fix forward", repair.lower())
         self.assertIn("never bisect", repair.lower())
         self.assertIn("gc.thunderdome.state=promoted", promote)
         self.assertIn("close source beads", promote.lower())
-        self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py candidate enqueue", enqueue)
+        self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py", enqueue)
+        self.assertIn("candidate enqueue", enqueue)
+
+    def test_land_prompts_fetch_validated_full_refs_without_remote_path_composition(self) -> None:
+        for relative in (
+            "thunderdome-land/freeze.md",
+            "thunderdome-land/assemble-land.md",
+            "thunderdome-land/verify-repair.md",
+            "thunderdome-land/promote.md",
+        ):
+            prompt = self.prompt(relative)
+            self.assertNotIn("origin/{{target_ref}}", prompt)
+            self.assertIn('git fetch --no-tags origin "{{target_ref}}"', prompt)
+            self.assertNotIn("candidate transition", prompt)
+        enqueue = self.prompt("thunderdome-build/enqueue.md")
+        freeze = self.prompt("thunderdome-land/freeze.md")
+        assemble = self.prompt("thunderdome-land/assemble-land.md")
+        self.assertIn('thunderdome.py --rig "${GC_RIG_NAME:?}"', enqueue)
+        self.assertIn('thunderdome.py --rig "${GC_RIG_NAME:?}"', freeze)
+        self.assertNotIn("--epoch-id", assemble)
+        self.assertNotIn("--state landed", assemble)
 
 
 class ReconcilePlannerTests(unittest.TestCase):

@@ -2,10 +2,11 @@ Run the full-system gate against the actual landed trunk SHA and fix forward
 every aggregate failure. Never bisect the epoch, revert a candidate merely to obtain
 green, or test an unmerged branch as release evidence.
 
-Resolve the epoch and current `landed_sha` from typed state. Fetch
-`origin/{{target_ref}}`, require its SHA equals that value, and create a clean
-verification worktree at that exact commit. Transition `landed` or `repairing`
-to `verifying` through `{{pack_root}}/assets/scripts/thunderdome.py epoch transition`. Run the
+Resolve the epoch and current `landed_sha` from typed state. Run
+`git fetch --no-tags origin "{{target_ref}}"`, require the exact `FETCH_HEAD` SHA
+equals that value, and create a clean verification worktree at that exact commit.
+Transition `landed` or `repairing` to `verifying` through
+`{{pack_root}}/assets/scripts/thunderdome.py epoch transition`. Run the
 repository-owned command exactly as configured: `{{full_gate_command}}`. Capture
 the command, environment identity, exit status, duration, and bounded sanitized
 output in `.gc/artifacts/<epoch-id>/verification/round-<n>.md`; never store
@@ -13,8 +14,9 @@ prompts, credentials, or raw private content.
 
 If the gate passes, transition the epoch to `verified` with
 `--verified-sha <current-landed-sha>` and `--verification-ref <artifact-path>`.
-Transition every sealed candidate from `landed` to `verified`. Read state back
-and close pass.
+The epoch transition atomically advances every sealed candidate from `landed`
+to `verified`; read the epoch and candidates back and close pass only after all
+states match.
 
 If the gate fails:
 

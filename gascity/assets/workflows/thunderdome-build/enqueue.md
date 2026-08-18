@@ -10,8 +10,8 @@ equals the recorded commit, and every source bead remains open.
 Run the pack-installed state adapter from the rig root:
 
 ```bash
-{{pack_root}}/assets/scripts/thunderdome.py candidate enqueue \
-  --rig "${GC_RIG_NAME:?}" \
+{{pack_root}}/assets/scripts/thunderdome.py --rig "${GC_RIG_NAME:?}" \
+  candidate enqueue \
   --delivery-unit "<delivery-unit-id>" \
   --commit "<exact-candidate-commit>" \
   --base-sha "<exact-pinned-base-sha>" \
