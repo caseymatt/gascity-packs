@@ -533,9 +533,11 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("fix forward", repair.lower())
         self.assertIn("never bisect", repair.lower())
         self.assertIn("gc.thunderdome.state=promoted", promote)
-        self.assertIn("close source beads", promote.lower())
+        self.assertIn("close source", promote.lower())
         self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py", enqueue)
         self.assertIn("candidate enqueue", enqueue)
+        self.assertIn("adapter transition atomically closes", promote.lower())
+        self.assertNotIn("gc bd close", promote)
 
     def test_land_prompts_fetch_validated_full_refs_without_remote_path_composition(self) -> None:
         for relative in (
