@@ -47,6 +47,9 @@ FORMULAS = {
     "publish",
     "review",
     "same-session-implement",
+    "thunderdome-build",
+    "thunderdome-land",
+    "thunderdome-work-item",
 }
 
 ROLE_AGENTS = {
@@ -77,6 +80,8 @@ CATALOG_FORMULAS = {
     "github-issue-triage",
     "github-pr-review",
     "implement",
+    "thunderdome-build",
+    "thunderdome-land",
     "review",
 }
 
@@ -742,7 +747,10 @@ class FormulaAssetTests(unittest.TestCase):
             data = tomllib.loads(path.read_text(encoding="utf-8"))
             name = path.name.removesuffix(".formula.toml")
             self.assertEqual(data["formula"], name)
-            self.assertEqual(data["contract"], "graph.v2")
+            self.assertEqual(
+                data.get("requires", {}).get("formula_compiler", data.get("contract")),
+                ">=2.0.0" if "requires" in data else "graph.v2",
+            )
             var_names = set(data.get("vars", {}))
             self.assertNotIn("issue", var_names)
             self.assertNotIn("bead_id", var_names)

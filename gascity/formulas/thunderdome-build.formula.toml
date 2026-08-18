@@ -1,0 +1,113 @@
+description = """
+Build one immutable Continuous Thunderdome delivery candidate from a convoy.
+Implementation is isolated per source bead, then integrated and reviewed as one
+candidate. This workflow never publishes a PR and never closes source beads.
+
+Launch input:
+- input convoy: {{convoy_id}}
+- implementation target: {{implementation_target}}
+- summary path: {{summary_path}}
+- review path: {{review_path}}
+- target ref: {{target_ref}}
+"""
+formula = "thunderdome-build"
+version = 2
+target_required = true
+sling_container_mode = "source"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[catalog]
+name = "thunderdome-build"
+description = "Build, integrate, review, and enqueue one immutable Thunderdome delivery candidate."
+
+[vars]
+[vars.context_path]
+description = "Optional implementation context bundle."
+default = ""
+
+[vars.implementation_target]
+description = "Role target for isolated implementation work."
+default = "gc.implementation-worker"
+
+[vars.summary_path]
+description = "Absolute aggregate implementation summary path."
+default = ""
+
+[vars.review_path]
+description = "Absolute aggregate review report path."
+default = ""
+
+[vars.target_ref]
+description = "Protected trunk ref the candidate is based on."
+default = "main"
+
+[[steps]]
+id = "prepare"
+title = "Validate candidate convoy and pin base"
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-build/prepare.md"
+
+[[steps]]
+id = "drain"
+title = "Implement delivery-unit sources in parallel"
+needs = ["prepare"]
+metadata = { "gc.run_target" = "{{implementation_target}}" }
+description_file = "../assets/workflows/thunderdome-build/drain.md"
+
+[steps.drain]
+context = "separate"
+formula = "thunderdome-work-item"
+member_access = "exclusive"
+
+[[steps]]
+id = "wait-for-drain"
+title = "Wait for candidate implementation drain"
+needs = ["drain"]
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-build/wait-for-drain.md"
+
+[[steps]]
+id = "integrate"
+title = "Integrate candidate item commits"
+needs = ["wait-for-drain"]
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-build/integrate.md"
+
+[[steps]]
+id = "summarize"
+title = "Write candidate implementation summary"
+needs = ["integrate"]
+metadata = { "gc.run_target" = "gc.run-operator", "gc.build.artifact_schema" = "gc.build.implementation-summary.v1", "gc.build.artifact_path_keys" = "gc.implementation.summary_path,gc.var.summary_path" }
+description_file = "../assets/workflows/thunderdome-build/summarize.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "review"
+title = "Review integrated candidate"
+needs = ["summarize"]
+metadata = { "gc.run_target" = "gc.implementation-reviewer", "gc.build.artifact_schema" = "gc.build.review.v1", "gc.build.artifact_path_keys" = "gc.build.review_report_path" }
+description_file = "../assets/workflows/thunderdome-build/review.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/implementation-review-approved.sh"
+timeout = "5m"
+
+[[steps]]
+id = "enqueue"
+title = "Enqueue reviewed delivery candidate"
+needs = ["review"]
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-build/enqueue.md"

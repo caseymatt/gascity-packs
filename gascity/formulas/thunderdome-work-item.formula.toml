@@ -1,0 +1,43 @@
+description = """
+Implement one source bead in an isolated worktree for a Continuous Thunderdome
+candidate. Produce a tested commit and implementation artifact. Leave the source
+bead open; verified promotion owns source closure.
+"""
+formula = "thunderdome-work-item"
+version = 2
+target_required = true
+sling_container_mode = "source"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+[vars.context_path]
+description = "Optional implementation context bundle."
+default = ""
+
+[vars.implementation_target]
+description = "Implementation role target."
+default = "gc.implementation-worker"
+
+
+[[steps]]
+id = "prepare-worktree"
+title = "Prepare isolated candidate worktree"
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-work-item/prepare-worktree.md"
+
+[[steps]]
+id = "implement"
+title = "Implement and test candidate source"
+needs = ["prepare-worktree"]
+metadata = { "gc.run_target" = "{{implementation_target}}", "gc.build.artifact_schema" = "gc.build.implementation-summary.v1", "gc.build.artifact_path_keys" = "gc.implementation.summary_path,gc.build.implementation_summary_path,gc.var.summary_path" }
+description_file = "../assets/workflows/thunderdome-work-item/implement.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
