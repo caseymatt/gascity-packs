@@ -8,9 +8,16 @@ equal the verified release SHA, preserve every worktree and record that cleanup
 was skipped. Never turn a failed or incomplete epoch into a cleanup candidate.
 
 For a promoted epoch, build an explicit ownership set from the epoch ID,
-candidate IDs, source IDs, and repair bead IDs in typed Thunderdome state. The
-only eligible paths are direct children of `$GC_RIG_ROOT/worktrees` whose names
-are one of:
+candidate IDs, source IDs, and repair bead IDs in typed Thunderdome state. For
+each sealed candidate, also read its canonical summary and review paths. Require
+both absolute paths to resolve inside the same registered Git worktree, require
+that worktree to be a direct child of `$GC_RIG_ROOT/worktrees`, and require its
+`HEAD` to equal the candidate's recorded commit. Add that exact path with its
+worktree basename as the owning ID; an ambiguous or mismatched path is blocked
+cleanup, never an inferred owner.
+
+The only other eligible paths are direct children of
+`$GC_RIG_ROOT/worktrees` whose names are one of:
 
 - an exact candidate, source, or repair bead ID
 - `thunderdome-epoch-<epoch-id>`

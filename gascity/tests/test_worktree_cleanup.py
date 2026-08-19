@@ -118,6 +118,8 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
             "candidate IDs",
             "source IDs",
             "repair bead IDs",
+            "canonical summary and review paths",
+            "worktree basename",
             "cleanup-worktree.sh",
             "dirty worktrees",
             "preserve",
