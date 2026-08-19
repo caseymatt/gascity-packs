@@ -45,7 +45,7 @@ For every formula change:
 
 ## Global Invariants
 
-- Every formula uses `contract = "graph.v2"`.
+- Every formula opts into formulas v2 with `[requires] formula_compiler = ">=2.0.0"`; existing formulas may retain the deprecated `contract = "graph.v2"` literal until migrated.
 - No formula declares reserved runtime vars `issue`, `bead_id`, or `convoy_id`.
 - Cataloged formulas are user-runnable; internal/base/helper formulas are not
   cataloged unless deliberately promoted.
@@ -167,6 +167,9 @@ this ledger against the `FORMULAS` constant and formula directory.
 | GC-BF-011 | `do-work` | Targeted implementation item helper | Extends `implementation-base`, prepares one item worktree, implements owned work with the selected implementation target, and closes the source anchor after implementation succeeds. | `do-work.formula.toml`; `../tests/test_formula_assets.py` |
 | GC-BF-012 | `do-work-item` | Targeted shared-drain item helper | Extends `implementation-item-base`, runs exactly one shared-drain item with the selected implementation target, and stays internal/single-lane. | `do-work-item.formula.toml`; `../tests/test_formula_assets.py` |
 | GC-BF-013 | `same-session-implement` | Targeted internal shared-drain helper | Documents and executes the pack-facing same-session policy by draining through `do-work-item` with exclusive member access and single-lane sequencing. | `same-session-implement.formula.toml`; `../tests/test_formula_assets.py` |
+| GC-BF-035 | `thunderdome-work-item` | Targeted candidate item helper | Implements one source bead in an isolated worktree, produces validated commit evidence, and leaves the source open until verified stable promotion. | `thunderdome-work-item.formula.toml`; `../tests/test_thunderdome.py` |
+| GC-BF-036 | `thunderdome-build` | Cataloged candidate builder | Drains one delivery unit in parallel, integrates every item commit, writes validated summary and review artifacts, enqueues one immutable candidate, and neither publishes nor closes source beads. | `thunderdome-build.formula.toml`; `../tests/test_thunderdome.py` |
+| GC-BF-037 | `thunderdome-land` | Cataloged epoch orchestrator | Freezes sealed candidate membership, lands one aggregate protected PR, verifies actual trunk, fans aggregate failures into fix-forward work, promotes an exact verified release ref, and only then closes sources. | `thunderdome-land.formula.toml`; `../tests/test_thunderdome.py` |
 
 ### Review And Fix Utilities
 

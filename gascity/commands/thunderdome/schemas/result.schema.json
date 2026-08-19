@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gascity.dev/schemas/commands/thunderdome/result.schema.json",
+  "title": "Continuous Thunderdome command result",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    },
+    "action": {
+      "enum": ["none", "would_dispatch", "would_resume", "dispatched"]
+    },
+    "due": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "epoch_id": {
+      "type": "string"
+    },
+    "workflow_id": {
+      "type": "string"
+    },
+    "candidate_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "queue": {
+      "type": "object"
+    },
+    "active_epochs": {
+      "type": "array"
+    },
+    "epochs": {
+      "type": "array"
+    },
+    "release": {
+      "type": "object"
+    },
+    "violations": {
+      "type": "array"
+    },
+    "metadata": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

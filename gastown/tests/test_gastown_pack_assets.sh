@@ -216,6 +216,48 @@ if verify >= metadata:
 PY
 }
 
+test_refinery_records_terminal_delivery_evidence() {
+    local formula
+    formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
+
+    python3 - "$formula" <<'PY' || fail "refinery direct and PR handoffs must persist terminal delivery evidence before close"
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+direct = text[
+    text.index('**If MERGE_STRATEGY = "direct"'):
+    text.index('**If MERGE_STRATEGY = "mr"')
+]
+pull_request = text[
+    text.index('**If MERGE_STRATEGY = "mr"'):
+    text.index('**If MERGE_STRATEGY = "local"')
+]
+
+for fragment in (
+    "--set-metadata merge_result=merged",
+    '--set-metadata merged_sha="$MERGED_SHA"',
+    '--set-metadata merged_target="$TARGET"',
+    'gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"',
+):
+    if fragment not in direct:
+        raise SystemExit(f"direct handoff missing {fragment}")
+if direct.index("--set-metadata merge_result=merged") > direct.index('gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"'):
+    raise SystemExit("direct handoff closes before recording merge evidence")
+
+for fragment in (
+    "--set-metadata merge_result=pull_request",
+    '--set-metadata pr_url="$PR_URL"',
+    '--set-metadata pr_number="$PR_NUMBER"',
+    '--set-metadata merged_target="$TARGET"',
+    'gc bd close $WORK --reason "Pull request ready: $PR_URL"',
+):
+    if fragment not in pull_request:
+        raise SystemExit(f"pull-request handoff missing {fragment}")
+if pull_request.index("--set-metadata merge_result=pull_request") > pull_request.index('gc bd close $WORK --reason "Pull request ready: $PR_URL"'):
+    raise SystemExit("pull-request handoff closes before recording delivery evidence")
+PY
+}
+
 test_dog_assets_are_pack_local
 test_retired_dog_formulas_are_not_reintroduced
 test_shutdown_dance_contracts_are_executable
@@ -223,6 +265,7 @@ test_shutdown_dance_lifecycle_and_audit_contracts
 test_composition_is_documented
 test_polecat_startup_uses_standard_hook_claim
 test_review_leg_contract_forbids_synthetic_mutation
+test_refinery_records_terminal_delivery_evidence
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
 
 echo "gastown pack asset tests passed"

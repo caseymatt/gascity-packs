@@ -1,0 +1,95 @@
+description = """
+Freeze an immutable candidate epoch, land its complete aggregate through one
+protected integration PR, diagnose and fix the aggregate forward until the
+full gate passes, then promote a verified release SHA and close its sources.
+
+Launch inputs:
+- candidate ids: {{candidate_ids}}
+- pinned base SHA: {{base_sha}}
+- target ref: {{target_ref}}
+- release ref: {{release_ref}}
+- full gate command: {{full_gate_command}}
+- repair target: {{repair_target}}
+- maximum repair rounds: {{max_repair_rounds}}
+"""
+formula = "thunderdome-land"
+version = 2
+target_required = true
+sling_container_mode = "source"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[catalog]
+name = "thunderdome-land"
+description = "Land, stabilize, verify, and promote one immutable Thunderdome epoch."
+
+[vars]
+[vars.candidate_ids]
+description = "Comma-separated reviewed candidate bead IDs."
+required = true
+
+[vars.base_sha]
+description = "Exact 40-character trunk SHA shared by every candidate."
+required = true
+
+[vars.target_ref]
+description = "Protected trunk branch receiving the aggregate epoch PR."
+default = "refs/heads/main"
+
+[vars.release_ref]
+description = "Protected stable release branch or tag ref."
+default = "refs/heads/release/stable"
+
+[vars.full_gate_command]
+description = "Repository-defined full-system verification command."
+required = true
+
+[vars.repair_target]
+description = "Role or pool target for parallel fix-forward repair work."
+default = "gc.implementation-worker"
+
+[vars.max_repair_rounds]
+description = "Pack policy cap for aggregate diagnosis and fix-forward rounds."
+default = "3"
+
+[[steps]]
+id = "freeze"
+title = "Freeze immutable land epoch"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-land/freeze.md"
+
+[[steps]]
+id = "assemble-land"
+title = "Assemble and land aggregate epoch"
+needs = ["freeze"]
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-land/assemble-land.md"
+
+[[steps]]
+id = "verify-repair"
+title = "Verify aggregate and fix forward"
+needs = ["assemble-land"]
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-land/verify-repair.md"
+
+[[steps]]
+id = "promote"
+title = "Promote verified stable release"
+needs = ["verify-repair"]
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-land/promote.md"
+
+[[steps]]
+id = "body"
+title = "Thunderdome landing scope"
+needs = ["promote"]
+description_file = "../assets/workflows/thunderdome-land/body.md"
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "thunderdome-land", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "cleanup"
+title = "Clean promoted formula worktrees"
+needs = ["body"]
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-land/cleanup.md"

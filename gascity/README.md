@@ -97,6 +97,78 @@ gc sling gc.run-operator <convoy-id> --on implement \
   --var drain_policy=separate
 ```
 
+
+## Continuous Thunderdome
+
+`thunderdome-build`, `thunderdome-work-item`, and `thunderdome-land` provide a
+continuous integration lane without making source delivery wait on the landing
+queue.
+
+1. `thunderdome-build` drains one delivery unit into isolated worktrees. Item
+   workers run focused behavioral tests with isolated Cargo targets. After the
+   drain barrier, one operator integrates the complete unit and runs the
+   repository-owned aggregate Rust gate exactly once before summary, review,
+   and recording one immutable `queued` candidate. It does not push, open a PR,
+   or close source beads.
+2. `gc gc thunderdome reconcile` selects a bounded set of candidates only when
+   queue depth or oldest-candidate age is due. It freezes that exact membership
+   into one epoch and dispatches `thunderdome-land`. An active epoch prevents a
+   second dispatch.
+3. `thunderdome-land` merges every frozen candidate into one aggregate branch
+   and protected PR. Where the provider cannot protect a private branch, it
+   requires the equivalent fail-closed path: all configured checks green and a
+   merge guarded by the candidate head SHA. The epoch is never bisected.
+4. The repository's full-system gate runs against the actual merged trunk SHA.
+   Aggregate failures create parallel fix-forward work, land as a repair PR,
+   and restart verification from the new merged SHA.
+5. Only a verified SHA may advance the stable release ref. The terminal
+   `promoted` transition atomically closes the epoch's sealed source beads.
+
+Candidate states are `queued -> frozen -> landed -> verified`, with
+`superseded` and `rejected` as explicit terminal alternatives. Epochs normally
+move through `assembling -> landed -> verifying -> verified -> promoting ->
+promoted`; failures use typed `red`, `repairing`, `promotion_failed`, `failed`,
+or `cancelled` states. Every transition appends bounded evidence to the bead
+metadata and emits a low-cardinality `thunderdome.transition` event.
+
+Launch a delivery-unit build from a convoy:
+
+```sh
+gc sling <rig>/gc.run-operator <convoy-id> --on thunderdome-build \
+  --var target_ref=main \
+  --var 'aggregate_rust_gate_command=cargo test --workspace'
+```
+
+Observe the durable state without reading worker transcripts:
+
+```sh
+gc gc thunderdome --rig <rig> status \
+  --trunk-sha "$(git -C <rig-path> rev-parse origin/main)" \
+  --fail-on-violation
+```
+
+Run the bounded trigger manually or from a cooldown order:
+
+```sh
+gc gc thunderdome --rig <rig> reconcile \
+  --trunk-sha "$(git -C <rig-path> rev-parse origin/main)" \
+  --target-ref refs/heads/main \
+  --max-depth 8 \
+  --max-age-seconds 1800 \
+  --full-gate-command 'just ci' \
+  --json
+```
+
+Use `--dry-run` to inspect the trigger decision. Reconcile fails closed when
+the projection reports an invariant violation, excludes candidates whose base
+does not equal current trunk, and resumes an assembling epoch when dispatch
+failed before its workflow ID was recorded.
+
+For rollback, disable the reconcile order first. Let an active epoch reach a
+typed terminal state; do not delete candidate or epoch beads. A failed or
+cancelled epoch remains queryable evidence, and queued candidates remain open
+until explicitly refreshed, superseded, or rejected.
+
 ## Launch variables that matter
 
 Every build entrypoint accepts the same knobs. Set them with `--var k=v` at

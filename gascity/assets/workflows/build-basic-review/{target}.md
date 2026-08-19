@@ -7,12 +7,12 @@ Use `gc bd update "<workflow-root-id>" --set-metadata "gc.build.review_report_pa
 Do not use `gc bd update --metadata 'key=value'`; `--metadata` only accepts a JSON
 object.
 
-Review approval is based on the implementation source anchor/worktree recorded
-in the review context and canonical implementation summary. Do not downgrade the
-review to `changes_required` because the launcher rig root has not been mutated;
-root propagation is handled by publish. If the source anchor/worktree satisfies
-the requirements and the remaining issue is only "not copied to root", write the
-normalized `gc.build.review.v1` artifact with `status: approved`.
+Review approval is based on the canonical integration worktree, branch, and
+commit recorded in the review context and implementation summary. Require
+`gc.build.integration_status=integrated` and verify
+`gc.build.integration_commit` is the reviewed worktree's current `HEAD`.
+Scattered source-anchor worktrees or an unchanged integration branch are
+`changes_required`, not an approved build.
 
 The approved review report must be a Markdown build artifact with YAML front
 matter, not JSON. If the latest synthesis is not already valid for
