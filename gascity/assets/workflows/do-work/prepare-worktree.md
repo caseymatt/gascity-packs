@@ -42,12 +42,22 @@ setup only. Do not edit source files in the launcher checkout.
    under
    `$WORKTREE`; downstream controller checks execute from that isolated
    worktree and must not depend on files outside it.
-6. Persist the absolute path on the source anchor with
+6. Attach the Code Storage remote so this worktree's commits can be published
+   before teardown. Run, from the launcher rig root:
+   `"$GC_CITY/tools/code-storage/gc-code-storage" attach "$GC_RIG" <source-anchor-id> 1 "$WORKTREE"`.
+   This writes a remote named `codestorage`, scoped by the token itself to this
+   anchor's attempt ref alone — it cannot push to `main`, to another bead, or
+   force-push. Never read, echo, or copy `tools/code-storage/.env`; the signing
+   key stays with the launcher and only the minted URL reaches this worktree.
+   If the command is absent or fails, record it on the source anchor as
+   `gc.codestorage=unavailable` and continue — a missing remote must not block
+   the run, it only means the worktree cannot be reclaimed automatically later.
+7. Persist the absolute path on the source anchor with
    `gc bd update <source-anchor-id> --set-metadata work_dir=<absolute worktree path>`.
    For synthetic drain-unit convoys, never persist `work_dir` on the synthetic drain-unit convoy; the original drain member/source anchor is authoritative.
    Verify the source anchor now has `work_dir` before closing this step with
    `gc.outcome=pass`.
-7. Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open
+8. Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open
    descendant carrying that root's `gc.root_bead_id`. Use the same absolute
    source-anchor worktree for every stamp, then read the downstream
    implementation step back and verify both keys equal that path. Complete this
