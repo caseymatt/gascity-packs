@@ -19,9 +19,13 @@ workflow root under the rig's `worktrees/` directory, starting exactly at the
 pinned base SHA. Merge every item commit in sorted source-bead order with
 explicit merge commits. Resolve overlaps by preserving all accepted behavior;
 never drop a candidate, bisect the delivery unit, or silently prefer one side.
-Run the union of item verification commands and repository formatting/static
-checks relevant to the changed paths. Fix integration-only failures in this
-worktree and commit those fixes.
+Do not run the union of item verification commands, a repository-wide test
+suite, or any broad Cargo validation in this step. In particular, this step
+must not run `cargo test --workspace`, `cargo test --all`, `cargo check`,
+`cargo build`, `cargo clippy`, or a repository wrapper that expands to an
+aggregate gate. Resolve merge conflicts and commit integration-only fixes, but
+leave all aggregate Rust validation to the single serialized `validate` step
+that follows this step and the completed drain barrier.
 
 Require a clean worktree. Copy the rig `.gc/scripts` and `.gc/schemas` into this
 worktree for downstream artifact checks. Record and read back on the workflow

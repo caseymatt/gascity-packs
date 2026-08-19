@@ -1,11 +1,14 @@
 Enqueue the reviewed integrated commit as one immutable landing candidate.
 
 Resolve the workflow root and require exact typed metadata for delivery unit,
-sorted source bead IDs, candidate commit, pinned base SHA, absolute summary
-path, absolute review path, and target ref. Read the review step from the same
-workflow; require `code_review.verdict=approved`, a closed-pass check, and a
-schema-valid report. Verify the integration worktree is clean, `HEAD` still
-equals the recorded commit, and every source bead remains open.
+sorted source bead IDs, candidate commit, serialized aggregate validation
+commit `gc.thunderdome.validation_commit`, pinned base SHA, absolute summary
+path, absolute review path, and target ref. Require the validation commit to
+equal the candidate commit. Read the
+review step from the same workflow; require `code_review.verdict=approved`, a
+closed-pass check, and a schema-valid report. Verify the integration worktree is
+clean, `HEAD` still equals both recorded commits, and every source bead remains
+open.
 
 Run the pack-installed state adapter from the rig root:
 

@@ -11,13 +11,46 @@ set -euo pipefail
 # The step bead (and the ralph control bead cloned from it) carries that
 # metadata, so this script reads $GC_BEAD_ID, resolves the workflow root via
 # gc.root_bead_id, resolves the artifact path, and validates the artifact with
-# the shared base validator. All failures print machine-readable lines on
-# stderr; the dispatcher records them in gc.attempt_log as repair context for
-# the next bounded producer attempt. This gate never prompts.
+# the shared base validator. Deterministic contract failures print
+# machine-readable repair context on stderr and exit 1. Store reads instead
+# preserve a bounded diagnostic and exit EX_TEMPFAIL so they can be retried
+# without spending an artifact-repair attempt. This gate never prompts.
 
 fail() {
   echo "build-artifact-check: $*" >&2
   exit 1
+}
+
+readonly EX_TEMPFAIL=75
+readonly STORE_DIAGNOSTIC_LIMIT=2048
+
+show_bead_json() {
+  local bead_id="$1"
+  local stderr_file output detail
+
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/gc-build-artifact-show.XXXXXX")" ||
+    fail "could not create temporary file for gc bd show diagnostics"
+  if output="$(gc bd show "$bead_id" --json 2>"$stderr_file")"; then
+    rm -f "$stderr_file"
+    printf '%s' "$output"
+    return 0
+  fi
+
+  # gc/bd may include terminal control bytes and an unbounded backend error
+  # stream. Keep a printable, single-line prefix: enough to diagnose the real
+  # store failure without letting it flood gc.attempt_log or control a terminal.
+  detail="$(
+    LC_ALL=C head -c "$STORE_DIAGNOSTIC_LIMIT" "$stderr_file" |
+      LC_ALL=C tr '\r\n\t' '   ' |
+      LC_ALL=C tr -cd '[:print:]'
+  )"
+  rm -f "$stderr_file"
+  if [ -n "$detail" ]; then
+    printf 'build-artifact-check: gc bd show %s failed: %s\n' "$bead_id" "$detail" >&2
+  else
+    printf 'build-artifact-check: gc bd show %s failed with no diagnostic\n' "$bead_id" >&2
+  fi
+  exit "$EX_TEMPFAIL"
 }
 
 BEAD_ID="${GC_BEAD_ID:-}"
@@ -49,7 +82,7 @@ print(value if isinstance(value, str) else "")
 ' "$2"
 }
 
-SHOW_JSON="$(gc bd show "$BEAD_ID" --json 2>/dev/null)" || fail "gc bd show $BEAD_ID failed"
+SHOW_JSON="$(show_bead_json "$BEAD_ID")"
 
 SCHEMA="$(metadata_value "$SHOW_JSON" "gc.build.artifact_schema")"
 PATH_KEYS="$(metadata_value "$SHOW_JSON" "gc.build.artifact_path_keys")"
@@ -59,7 +92,7 @@ PATH_KEYS="$(metadata_value "$SHOW_JSON" "gc.build.artifact_path_keys")"
 ROOT_ID="$(metadata_value "$SHOW_JSON" "gc.root_bead_id")"
 ROOT_JSON="$SHOW_JSON"
 if [ -n "$ROOT_ID" ] && [ "$ROOT_ID" != "$BEAD_ID" ]; then
-  ROOT_JSON="$(gc bd show "$ROOT_ID" --json 2>/dev/null)" || fail "gc bd show $ROOT_ID failed"
+  ROOT_JSON="$(show_bead_json "$ROOT_ID")"
 fi
 
 ARTIFACT_PATH=""

@@ -478,20 +478,105 @@ class FormulaContractTests(unittest.TestCase):
     def prompt(self, relative: str) -> str:
         return (self.ROOT / "assets" / "workflows" / relative).read_text(encoding="utf-8")
 
-    def test_build_queues_reviewed_candidates_without_publishing_or_closing_sources(self) -> None:
+    def test_build_serializes_one_aggregate_rust_gate_after_the_drain(self) -> None:
         data = self.formula("thunderdome-build")
         steps = data["steps"]
         ids = [step["id"] for step in steps]
 
         self.assertEqual(
             ids,
-            ["prepare", "drain", "wait-for-drain", "integrate", "summarize", "review", "enqueue"],
+            [
+                "prepare",
+                "drain",
+                "wait-for-drain",
+                "integrate",
+                "validate",
+                "summarize",
+                "review",
+                "enqueue",
+            ],
         )
         self.assertEqual(steps[1]["drain"]["formula"], "thunderdome-work-item")
-        self.assertEqual(steps[5]["check"]["check"]["path"], ".gc/scripts/checks/implementation-review-approved.sh")
+        self.assertEqual(steps[3]["needs"], ["wait-for-drain"])
+        self.assertEqual(steps[4]["needs"], ["integrate"])
+        self.assertEqual(steps[4]["metadata"]["gc.run_target"], "gc.run-operator")
+        self.assertEqual(steps[5]["needs"], ["validate"])
+        self.assertTrue(data["vars"]["aggregate_rust_gate_command"]["required"])
+        self.assertEqual(
+            steps[5]["check"]["check"]["path"],
+            ".gc/scripts/checks/build-artifact-valid.sh",
+        )
+        self.assertEqual(
+            steps[6]["check"]["check"]["path"],
+            ".gc/scripts/checks/implementation-review-approved.sh",
+        )
         self.assertNotIn("publish", ids)
         self.assertNotIn("close-source-anchor", ids)
         self.assertEqual(data["requires"]["formula_compiler"], ">=2.0.0")
+
+    def test_readme_launch_supplies_the_required_serialized_rust_gate(self) -> None:
+        readme = (self.ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "--var 'aggregate_rust_gate_command=cargo test --workspace'",
+            readme,
+        )
+        self.assertIn("focused behavioral tests", readme)
+        self.assertIn("after the drain barrier", " ".join(readme.lower().split()))
+
+    def test_rust_validation_assets_isolate_worker_targets_and_one_gate_owner(self) -> None:
+        item = self.prompt("thunderdome-work-item/implement.md")
+        integrate = self.prompt("thunderdome-build/integrate.md")
+        validate = self.prompt("thunderdome-build/validate.md")
+        build_assets = [
+            self.prompt(f"thunderdome-build/{name}.md")
+            for name in (
+                "prepare",
+                "drain",
+                "wait-for-drain",
+                "integrate",
+                "validate",
+                "summarize",
+                "review",
+                "enqueue",
+            )
+        ]
+
+        for broad_command in (
+            "cargo test --workspace",
+            "cargo test --all",
+            "cargo check",
+            "cargo build",
+            "cargo clippy",
+        ):
+            with self.subTest(command=broad_command):
+                self.assertIn(broad_command, item)
+        self.assertIn("focused behavioral tests only", item)
+        self.assertIn("must not run", item)
+        self.assertIn("CARGO_TARGET_DIR", item)
+        self.assertIn("<source-anchor-id>", item)
+        self.assertIn("/tmp", item)
+        self.assertIn("installed pack or provider environment", item)
+        self.assertIn(".cargo-targets/<source-anchor-id>", item)
+        self.assertIn("must not run", integrate)
+        self.assertEqual(
+            sum("{{aggregate_rust_gate_command}}" in asset for asset in build_assets),
+            1,
+        )
+        self.assertIn("exactly once", validate)
+        self.assertIn("serial", validate)
+        self.assertIn("CARGO_TARGET_DIR", validate)
+        self.assertIn("<workflow-root-id>", validate)
+        self.assertIn("/tmp", validate)
+        self.assertIn("installed pack or provider environment", validate)
+        self.assertIn(".cargo-targets/<workflow-root-id>/aggregate", validate)
+        self.assertIn("gc.thunderdome.validation_commit=<exact HEAD>", validate)
+        summary = self.prompt("thunderdome-build/summarize.md")
+        review = self.prompt("thunderdome-build/review.md")
+        enqueue = self.prompt("thunderdome-build/enqueue.md")
+        for downstream in (summary, review, enqueue):
+            with self.subTest(downstream=downstream[:24]):
+                self.assertIn("gc.thunderdome.validation_commit", downstream)
 
     def test_work_item_never_closes_its_source_anchor(self) -> None:
         data = self.formula("thunderdome-work-item")

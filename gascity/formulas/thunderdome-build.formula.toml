@@ -9,6 +9,7 @@ Launch input:
 - summary path: {{summary_path}}
 - review path: {{review_path}}
 - target ref: {{target_ref}}
+- aggregate Rust gate command: {{aggregate_rust_gate_command}}
 """
 formula = "thunderdome-build"
 version = 2
@@ -43,6 +44,10 @@ default = ""
 description = "Protected trunk ref the candidate is based on."
 default = "main"
 
+[vars.aggregate_rust_gate_command]
+description = "Repository-defined aggregate Rust validation/check command, run once after integration."
+required = true
+
 [[steps]]
 id = "prepare"
 title = "Validate candidate convoy and pin base"
@@ -76,9 +81,16 @@ metadata = { "gc.run_target" = "gc.run-operator" }
 description_file = "../assets/workflows/thunderdome-build/integrate.md"
 
 [[steps]]
+id = "validate"
+title = "Validate integrated Rust candidate once"
+needs = ["integrate"]
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-build/validate.md"
+
+[[steps]]
 id = "summarize"
 title = "Write candidate implementation summary"
-needs = ["integrate"]
+needs = ["validate"]
 metadata = { "gc.run_target" = "gc.run-operator", "gc.build.artifact_schema" = "gc.build.implementation-summary.v1", "gc.build.artifact_path_keys" = "gc.implementation.summary_path,gc.var.summary_path" }
 description_file = "../assets/workflows/thunderdome-build/summarize.md"
 

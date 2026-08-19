@@ -2,10 +2,12 @@ Review the integrated Continuous Thunderdome candidate as one delivery unit.
 This is report-only: do not edit code, amend commits, push, publish, or close
 source beads.
 
-Resolve the workflow root, pinned base SHA, exact candidate commit, source
-membership, item artifacts, aggregate summary, and integration worktree from
-typed metadata. Verify the candidate worktree is clean and its `HEAD` equals
-`gc.thunderdome.commit`. Review the complete diff from pinned base to candidate,
+Resolve the workflow root, pinned base SHA, exact candidate commit, serialized
+aggregate validation commit, source membership, item artifacts, aggregate
+summary, and integration worktree from typed metadata. Verify the candidate
+worktree is clean and its `HEAD` equals both `gc.thunderdome.commit` and
+`gc.thunderdome.validation_commit`. Review the complete diff from pinned base to
+candidate,
 not each item in isolation. Check acceptance behavior, regression evidence,
 security/correctness boundaries, integration conflicts, simplicity, and whether
 every source bead is represented exactly once.

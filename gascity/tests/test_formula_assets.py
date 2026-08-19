@@ -4345,8 +4345,11 @@ description = "Override sink that writes the base triage report contract."
                 "shift\n"
                 "case \"$1\" in\n"
                 "  version) exit 0 ;;\n"
-                "  show) cat \"$BD_SHOW_DIR/$2.json\" ;;\n"
-                "  *) exit 2 ;;\n"
+                '  show) if [ "${BD_SHOW_FAILURE_ID:-}" = "$2" ]; then\n'
+                '          printf "%s\\n" "${BD_SHOW_FAILURE_MESSAGE:-store unavailable}" >&2\n'
+                "          exit 70\n"
+                "        fi\n"
+                '        cat "$BD_SHOW_DIR/$2.json" ;;\n'
                 "esac\n",
                 encoding="utf-8",
             )
@@ -4814,8 +4817,40 @@ description = "Override sink that writes the base triage report contract."
 
         self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
         self.assertIn("build artifact valid", valid.stdout)
-        self.assertNotEqual(invalid.returncode, 0, invalid.stdout + invalid.stderr)
+        self.assertEqual(invalid.returncode, 1, invalid.stdout + invalid.stderr)
         self.assertIn("failed validation", invalid.stderr)
+
+    def test_build_artifact_check_classifies_store_failure_as_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            artifact = pathlib.Path(artifact_dir) / "requirements.md"
+            artifact.write_text(self._valid_requirements_artifact(), encoding="utf-8")
+            control = (
+                '[{"id": "loop", "metadata": {'
+                '"gc.root_bead_id": "root", '
+                '"gc.build.artifact_schema": "gc.build.requirements.v1", '
+                '"gc.build.artifact_path_keys": "gc.build.requirements_path"}}]'
+            )
+            root_bead = (
+                '[{"id": "root", "metadata": {'
+                f'"gc.build.requirements_path": "{artifact}"'
+                "}}]"
+            )
+            diagnostic = "store unavailable: dial tcp: connection refused"
+            result = self._run_build_artifact_check(
+                {"loop": control, "root": root_bead},
+                "loop",
+                extra_env={
+                    "PYTHONNOUSERSITE": "1",
+                    "BD_SHOW_FAILURE_ID": "root",
+                    "BD_SHOW_FAILURE_MESSAGE": diagnostic + "\x1b[31m" + ("x" * 10_000),
+                },
+                hermetic_python=True,
+            )
+
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertIn(diagnostic, result.stderr)
+        self.assertNotIn("\x1b", result.stderr)
+        self.assertLessEqual(len(result.stderr.encode("utf-8")), 2_200)
 
     def test_build_artifact_check_uses_hidden_installed_schema_tree(self) -> None:
         with tempfile.TemporaryDirectory() as td:

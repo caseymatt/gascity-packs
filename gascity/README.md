@@ -104,9 +104,12 @@ gc sling gc.run-operator <convoy-id> --on implement \
 continuous integration lane without making source delivery wait on the landing
 queue.
 
-1. `thunderdome-build` drains one delivery unit into isolated worktrees,
-   integrates and reviews the complete unit, then records one immutable
-   `queued` candidate. It does not push, open a PR, or close source beads.
+1. `thunderdome-build` drains one delivery unit into isolated worktrees. Item
+   workers run focused behavioral tests with isolated Cargo targets. After the
+   drain barrier, one operator integrates the complete unit and runs the
+   repository-owned aggregate Rust gate exactly once before summary, review,
+   and recording one immutable `queued` candidate. It does not push, open a PR,
+   or close source beads.
 2. `gc gc thunderdome reconcile` selects a bounded set of candidates only when
    queue depth or oldest-candidate age is due. It freezes that exact membership
    into one epoch and dispatches `thunderdome-land`. An active epoch prevents a
@@ -132,7 +135,8 @@ Launch a delivery-unit build from a convoy:
 
 ```sh
 gc sling <rig>/gc.run-operator <convoy-id> --on thunderdome-build \
-  --var target_ref=main
+  --var target_ref=main \
+  --var 'aggregate_rust_gate_command=cargo test --workspace'
 ```
 
 Observe the durable state without reading worker transcripts:
