@@ -509,10 +509,17 @@ class FormulaContractTests(unittest.TestCase):
         steps = data["steps"]
         ids = [step["id"] for step in steps]
 
-        self.assertEqual(ids, ["freeze", "assemble-land", "verify-repair", "promote"])
+        self.assertEqual(
+            ids,
+            ["freeze", "assemble-land", "verify-repair", "promote", "body", "cleanup"],
+        )
         self.assertEqual(steps[1]["needs"], ["freeze"])
         self.assertEqual(steps[2]["needs"], ["assemble-land"])
         self.assertEqual(steps[3]["needs"], ["verify-repair"])
+        self.assertEqual(steps[4]["needs"], ["promote"])
+        self.assertEqual(steps[5]["needs"], ["body"])
+        self.assertEqual(steps[4]["metadata"]["gc.kind"], "scope")
+        self.assertEqual(steps[5]["metadata"]["gc.kind"], "cleanup")
         self.assertEqual(data["requires"]["formula_compiler"], ">=2.0.0")
         self.assertEqual(data["vars"]["target_ref"]["default"], "refs/heads/main")
         self.assertEqual(
