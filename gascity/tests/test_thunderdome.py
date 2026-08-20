@@ -827,6 +827,56 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("private-token", str(raised.exception))
         self.assertIn("exit 17", str(raised.exception))
 
+    def test_client_decodes_structured_metadata_strings_and_rejects_malformed_values(self) -> None:
+        candidate = self.module.new_candidate_metadata(
+            source_beads=["sp-source"],
+            delivery_unit="DU-ONE",
+            commit=COMMIT_SHA,
+            base_sha=BASE_SHA,
+            summary_path="/summary.json",
+            review_path="/review.json",
+            now=NOW,
+        )
+        encoded = dict(candidate)
+        for key in (
+            "gc.thunderdome.source_beads",
+            "gc.thunderdome.history",
+        ):
+            encoded[key] = json.dumps(encoded[key])
+
+        def valid_runner(args, _env):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=json.dumps([{"id": "sp-candidate", "metadata": encoded}]),
+                stderr="",
+            )
+
+        client = self.module.BeadClient(runner=valid_runner)
+        metadata = client.show(["sp-candidate"])[0]["metadata"]
+        self.assertEqual(metadata["gc.thunderdome.source_beads"], ["sp-source"])
+        transitioned = self.module.transition_metadata(
+            metadata,
+            "frozen",
+            now=LATER,
+            evidence={"epoch_id": "sp-epoch"},
+        )
+        self.assertEqual(transitioned["gc.thunderdome.history"][-1]["to"], "frozen")
+
+        malformed = dict(encoded)
+        malformed["gc.thunderdome.history"] = "["
+
+        def malformed_runner(args, _env):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=json.dumps([{"id": "sp-candidate", "metadata": malformed}]),
+                stderr="",
+            )
+
+        with self.assertRaisesRegex(self.module.CommandError, "gc.thunderdome.history"):
+            self.module.BeadClient(runner=malformed_runner).show(["sp-candidate"])
+
     def test_transition_event_is_low_cardinality_and_content_free(self) -> None:
         calls: list[list[str]] = []
 

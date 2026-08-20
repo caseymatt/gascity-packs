@@ -97,6 +97,39 @@ class CommandError(RuntimeError):
     """A gc or git adapter command failed."""
 
 
+STRUCTURED_ID_METADATA_KEYS = {
+    PREFIX + "candidate_ids",
+    PREFIX + "repair_bead_ids",
+    PREFIX + "source_beads",
+}
+
+
+def decode_thunderdome_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(dict(record))
+    metadata = result.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return result
+    decoded = dict(metadata)
+    for key in [*sorted(STRUCTURED_ID_METADATA_KEYS), HISTORY]:
+        if key not in decoded:
+            continue
+        value = decoded[key]
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise CommandError(f"metadata field {key} contains malformed JSON") from exc
+        if not isinstance(value, list):
+            raise CommandError(f"metadata field {key} must decode to an array")
+        if key == HISTORY:
+            if any(not isinstance(item, Mapping) for item in value):
+                raise CommandError(f"metadata field {key} must contain objects")
+        elif any(not isinstance(item, str) or not item.strip() for item in value):
+            raise CommandError(f"metadata field {key} must contain non-empty strings")
+        decoded[key] = value
+    result["metadata"] = decoded
+    return result
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -706,12 +739,15 @@ class BeadClient:
                 "--json",
             ]
         )
-        return list(result)
+        return [decode_thunderdome_record(record) for record in result]
 
     def show(self, bead_ids: Sequence[str]) -> list[dict[str, Any]]:
         if not bead_ids:
             return []
-        return list(self.run(["bd", "show", *bead_ids, "--json"]))
+        return [
+            decode_thunderdome_record(record)
+            for record in self.run(["bd", "show", *bead_ids, "--json"])
+        ]
 
     def create_record(self, title: str, label: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
         created = self.run(
@@ -741,13 +777,15 @@ class BeadClient:
                 "--json",
             ]
         )
-        return updated[0] if isinstance(updated, list) else updated
+        record = updated[0] if isinstance(updated, list) else updated
+        return decode_thunderdome_record(record)
 
     def update_metadata(self, bead_id: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
         updated = self.run(
             ["bd", "update", bead_id, "--metadata", canonical_json(metadata), "--json"]
         )
-        return updated[0] if isinstance(updated, list) else updated
+        record = updated[0] if isinstance(updated, list) else updated
+        return decode_thunderdome_record(record)
 
     def close(self, bead_id: str, reason: str) -> None:
         self.run(["bd", "close", bead_id, "--reason", reason, "--json"])
