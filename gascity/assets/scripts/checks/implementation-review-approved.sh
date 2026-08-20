@@ -1,36 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-gmol() {   # root_id -> molecule-member JSON array
-    # `gc bd list --metadata-field` is a collection query carrying no bead id,
-    # so on a city that relocates the graph class bd has nothing to route on and
-    # refuses the read -- and the `2>/dev/null` below turned that refusal into an
-    # empty set, so this gate never saw code_review.verdict and looped until Ralph
-    # ran out of attempts.
-    #
-    # `gc ready` is the federating reader: city store, rig stores and the
-    # relocated graph store, across both tiers. It takes exactly one --status
-    # and has no --all, so the member set is the union of one leg per status.
-    # The four legs are independent reads, so run them concurrently: a check
-    # gate has a 10m budget and each `gc ready` costs ~17s on a loaded city.
-    # A leg that fails is reported on stderr and fails the function rather than
-    # contributing an empty set -- silent starvation is the bug being fixed.
-    local root="$1" tmp st rc=0
-    tmp="$(mktemp -d)" || return 1
+gmol() {   # root_id root_store_ref -> molecule-member JSON array
+    # A rig-owned graph can be read from that rig directly; this prevents an
+    # unrelated unhealthy store from blocking its review gate. Other store
+    # classes use the federating reader because collection queries carry no bead
+    # ID from which `gc bd` could infer a relocated graph store.
+    local root="$1" store_ref="$2" tmp st rc=0
+    tmp="$(mktemp -d)" || return 75
     for st in open in_progress blocked closed; do
-        { gc ready --metadata-field "gc.root_bead_id=$root" --status "$st" --limit 0 --json \
-            >"$tmp/$st.json" || printf '%s\n' "$st" >>"$tmp/failed"; } &
+        {
+            if [[ "$store_ref" == rig:* ]]; then
+                gc bd list --rig "${store_ref#rig:}" \
+                    --metadata-field "gc.root_bead_id=$root" --status "$st" --limit 0 --json
+            else
+                gc ready --metadata-field "gc.root_bead_id=$root" \
+                    --status "$st" --limit 0 --json
+            fi >"$tmp/$st.json" || printf '%s\n' "$st" >>"$tmp/failed"
+        } &
     done
     wait
     if [ -s "$tmp/failed" ]; then
-        echo "gmol: gc ready failed for status: $(tr '\n' ' ' <"$tmp/failed")" >&2
-        rc=1
+        echo "gmol: graph read failed for status: $(tr '\n' ' ' <"$tmp/failed")" >&2
+        rc=75
     fi
     # unique_by sorts by id, so the union comes back in bead-id order. The
     # verdict extractors below take `| last`, which must mean "most recently
     # updated" -- without this re-sort the gate picks a verdict by id hash and
     # can sit on a stale `iterate` forever while a newer `done` is ignored.
-    jq -s 'map(select(type=="array")) | add // [] | unique_by(.id) | sort_by(.updated_at // "")' "$tmp"/*.json || rc=1
+    if ! jq -s 'map(select(type=="array")) | add // [] | unique_by(.id) | sort_by(.updated_at // "")' "$tmp"/*.json; then
+        rc=75
+    fi
     rm -rf "$tmp"
     return "$rc"
 }
@@ -71,7 +71,8 @@ if [ -z "$SCOPE_REF" ]; then
   SCOPE_REF="$(metadata_value "$ROOT_JSON" "gc.step_ref")"
 fi
 
-MATCHES="$(gmol "$PARENT_ROOT")"
+ROOT_STORE_REF="$(metadata_value "$PARENT_JSON" "gc.root_store_ref")"
+MATCHES="$(gmol "$PARENT_ROOT" "$ROOT_STORE_REF")"
 
 VERDICT="$(printf '%s\n' "$MATCHES" | jq -r --arg attempt "$ATTEMPT" '
   [
@@ -82,14 +83,6 @@ VERDICT="$(printf '%s\n' "$MATCHES" | jq -r --arg attempt "$ATTEMPT" '
   ] | last // ""
 ' 2>/dev/null)"
 
-REPORT="$(printf '%s\n' "$MATCHES" | jq -r --arg attempt "$ATTEMPT" '
-  [
-    .[]
-    | select((.metadata["gc.attempt"] // "") == $attempt)
-    | select((.metadata["code_review.report_path"] // "") != "")
-    | .metadata["code_review.report_path"]
-  ] | last // ""
-' 2>/dev/null)"
 
 REVIEW_MODE="$(metadata_value "$ROOT_JSON" "gc.var.review_mode")"
 if [ -z "$REVIEW_MODE" ]; then

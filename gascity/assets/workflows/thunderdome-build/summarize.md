@@ -30,7 +30,13 @@ The body contains these exact `##` headings in order:
 Include pinned base SHA, exact candidate commit, item commits, changed files,
 the single aggregate gate command/result and its canonical non-`/tmp`
 `CARGO_TARGET_DIR`, focused item test commands/results, and remaining risks
-without private prompt or transcript content. Record the absolute path on the
+without private prompt or transcript content.
+
+Derive every change claim from the pinned-base-to-candidate diff. Classify
+production versus test changes by the changed lines' actual scope, not by file
+path or deletion counts. Never describe a production reorganization unless the
+diff contains it; when all hunks are inside test modules, say that explicitly.
+Record the absolute path on the
 workflow root as
 both `gc.build.implementation_summary_path` and
 `gc.implementation.summary_path`.

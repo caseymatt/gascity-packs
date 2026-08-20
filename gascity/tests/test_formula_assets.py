@@ -680,11 +680,11 @@ def assert_pack_or_role_route_target(
 def write_check_gc_stub(bin_dir: pathlib.Path, *, parent_show: bool = False) -> pathlib.Path:
     """Write a fake `gc` for the check-script tests, and return its path.
 
-    The check gates enumerate molecule members with `gc ready` (one leg per
-    --status) rather than a metadata-filtered `gc bd list`, because a collection
-    query carries no bead id and is refused on a city that relocates the graph
-    class. The stub answers every `ready` leg from BD_LIST_JSON, so the union
-    the gate builds is the same member set the old single list call returned.
+    The check gates read rig-owned graphs directly with `gc bd list --rig`; for
+    relocated non-rig graphs they use `gc ready` (one leg per --status), because
+    a collection query carries no bead id from which `gc bd` could infer the
+    store. The stub answers either path from BD_LIST_JSON, so the union the gate
+    builds is the same member set.
 
     `ready` without --metadata-field is rejected: unscoped, it would return the
     whole city and the gate could read a *different* molecule's verdict. Any
@@ -710,6 +710,7 @@ def write_check_gc_stub(bin_dir: pathlib.Path, *, parent_show: bool = False) -> 
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "if [ \"${1:-}\" = \"ready\" ]; then\n"
+        "  if [ \"${FAIL_READY:-0}\" = \"1\" ]; then echo \"stub: gc ready unavailable\" >&2; exit 75; fi\n"
         "  case \" $* \" in\n"
         "    *\" --metadata-field \"*) : ;;\n"
         "    *) echo \"stub: gc ready without --metadata-field\" >&2; exit 2 ;;\n"
@@ -728,7 +729,15 @@ def write_check_gc_stub(bin_dir: pathlib.Path, *, parent_show: bool = False) -> 
         "case \"$1\" in\n"
         "  version) exit 0 ;;\n"
         "  show)\n" + show + "    ;;\n"
-        "  list) cat \"$BD_LIST_JSON\" ;;\n"
+        "  list)\n"
+        "    if [ -n \"${EXPECT_RIG:-}\" ]; then\n"
+        "      case \" $* \" in\n"
+        "        *\" --rig $EXPECT_RIG \"*) : ;;\n"
+        "        *) echo \"stub: gc bd list missing --rig $EXPECT_RIG\" >&2; exit 2 ;;\n"
+        "      esac\n"
+        "    fi\n"
+        "    cat \"$BD_LIST_JSON\"\n"
+        "    ;;\n"
         "  *) exit 2 ;;\n"
         "esac\n",
         encoding="utf-8",
@@ -4512,6 +4521,46 @@ description = "Override sink that writes the base triage report contract."
                 list_json=list_json,
                 extra_env={"GC_WORK_DIR": str(work_dir)},
             )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Implementation review approved", result.stdout)
+
+    def test_implementation_review_check_reads_owning_rig_directly(self) -> None:
+        show_json = """[
+  {
+    "id": "loop",
+    "metadata": {
+      "gc.root_bead_id": "root",
+      "gc.step_id": "review"
+    }
+  }
+]"""
+        parent_show_json = """[
+  {
+    "id": "root",
+    "metadata": {
+      "gc.root_store_ref": "rig:proof"
+    }
+  }
+]"""
+        list_json = """[
+  {
+    "id": "review",
+    "metadata": {
+      "gc.root_bead_id": "root",
+      "gc.attempt": "1",
+      "gc.step_id": "review",
+      "code_review.verdict": "done"
+    }
+  }
+]"""
+
+        result = self._run_implementation_review_check(
+            show_json=show_json,
+            parent_show_json=parent_show_json,
+            list_json=list_json,
+            extra_env={"FAIL_READY": "1", "EXPECT_RIG": "proof"},
+        )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Implementation review approved", result.stdout)
