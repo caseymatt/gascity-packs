@@ -11,6 +11,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "assets" / "scripts" / "cleanup-worktree.sh"
 FORMULA = ROOT / "formulas" / "thunderdome-land.formula.toml"
 PROMPT = ROOT / "assets" / "workflows" / "thunderdome-land" / "cleanup.md"
+ASSEMBLE_PROMPT = ROOT / "assets" / "workflows" / "thunderdome-land" / "assemble-land.md"
+VERIFY_PROMPT = ROOT / "assets" / "workflows" / "thunderdome-land" / "verify-repair.md"
 
 
 class WorktreeCleanupScriptTests(unittest.TestCase):
@@ -59,6 +61,14 @@ class WorktreeCleanupScriptTests(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assertIn("removed", result.stdout)
         self.assertNotIn(str(worktree), self._git("worktree", "list", "--porcelain").stdout)
+
+    def test_removes_contract_named_epoch_and_verification_worktrees(self) -> None:
+        for name in ("thunderdome-epoch-sp-epoch", "verify-sp-epoch-r1"):
+            with self.subTest(name=name):
+                worktree = self._worktree(name)
+                result = self._cleanup(worktree, "sp-epoch", check=True)
+                self.assertFalse(worktree.exists())
+                self.assertIn("removed", result.stdout)
 
     def test_preserves_dirty_owned_worktree(self) -> None:
         worktree = self._worktree("sp-source")
@@ -128,6 +138,19 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, text)
+
+    def test_creation_prompts_use_cleanup_contract_worktree_names(self) -> None:
+        assemble = ASSEMBLE_PROMPT.read_text(encoding="utf-8")
+        verify = VERIFY_PROMPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "$GC_RIG_ROOT/worktrees/thunderdome-epoch-<epoch-id>",
+            assemble,
+        )
+        self.assertIn(
+            "$GC_RIG_ROOT/worktrees/verify-<epoch-id>-r<N>",
+            verify,
+        )
 
 
 if __name__ == "__main__":

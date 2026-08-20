@@ -7,7 +7,8 @@ candidate IDs through `{{pack_root}}/assets/scripts/thunderdome.py status --json
 invariant violation. Run `git fetch --no-tags origin "{{target_ref}}"`, resolve
 `FETCH_HEAD`, and fail closed if that exact SHA no longer equals the pinned base.
 
-Create or safely reuse an epoch worktree and branch named
+Create or safely reuse the epoch worktree at
+`$GC_RIG_ROOT/worktrees/thunderdome-epoch-<epoch-id>` and branch
 `thunderdome/epoch-<epoch-id>` at exactly the pinned base. For candidates in the
 sealed order, verify each exact commit exists and descends from the base, then
 merge it with an explicit merge commit. Resolve textual conflicts while

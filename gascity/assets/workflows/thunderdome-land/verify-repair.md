@@ -4,8 +4,9 @@ green, or test an unmerged branch as release evidence.
 
 Resolve the epoch and current `landed_sha` from typed state. Run
 `git fetch --no-tags origin "{{target_ref}}"`, require the exact `FETCH_HEAD` SHA
-equals that value, and create a clean verification worktree at that exact commit.
-Transition `landed` or `repairing` to `verifying` through
+equals that value, and, for verification round `<N>` starting at 1, create a
+clean worktree at `$GC_RIG_ROOT/worktrees/verify-<epoch-id>-r<N>` on that exact
+commit. Transition `landed` or `repairing` to `verifying` through
 `{{pack_root}}/assets/scripts/thunderdome.py epoch transition`. Run the
 repository-owned command exactly as configured: `{{full_gate_command}}`. Capture
 the command, environment identity, exit status, duration, and bounded sanitized
