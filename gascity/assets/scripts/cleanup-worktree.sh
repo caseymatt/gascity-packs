@@ -17,48 +17,88 @@ worktree_arg="$2"
 owner_id="$3"
 promoted_sha="$4"
 
-[[ "$owner_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail 64 "invalid owner id"
-[[ "$promoted_sha" =~ ^[0-9a-fA-F]{40}$ ]] || fail 64 "promoted SHA must contain exactly 40 hexadecimal characters"
+[[ "$owner_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+  fail 64 "invalid owner id"
+[[ "$promoted_sha" =~ ^[0-9a-fA-F]{40}$ ]] ||
+  fail 64 "promoted SHA must contain exactly 40 hexadecimal characters"
+[[ -d "$rig_arg" ]] || fail 65 "rig root does not exist: $rig_arg"
 
-rig_root="$(git -C "$rig_arg" rev-parse --show-toplevel 2>/dev/null)" || fail 65 "rig root is not a Git worktree: $rig_arg"
-rig_root="$(cd "$rig_root" && pwd -P)"
-[[ -d "$worktree_arg" ]] || fail 66 "worktree does not exist: $worktree_arg"
-worktree="$(cd "$worktree_arg" && pwd -P)"
-owned_parent="$rig_root/worktrees"
-[[ "$(dirname "$worktree")" == "$owned_parent" ]] || fail 67 "worktree is outside the formula-owned directory: $worktree"
+gc_bin="$(command -v gc)" ||
+  fail 69 "gc is unavailable; registered worktree preserved: $worktree_arg"
+python_bin="$(command -v python3)" ||
+  fail 69 "python3 is unavailable; cannot validate registry ownership; preserved: $worktree_arg"
 
-worktree_name="$(basename "$worktree")"
-case "$worktree_name" in
-  "$owner_id"|"thunderdome-epoch-$owner_id"|"verify-$owner_id-r"[0-9]*|"repair-int-$owner_id-r"[0-9]*)
-    ;;
-  *)
-    fail 68 "worktree name does not match owner $owner_id: $worktree_name"
-    ;;
-esac
+rig_root="$(cd "$rig_arg" && pwd -P)" ||
+  fail 65 "cannot resolve rig root: $rig_arg"
+worktree="$(
+  "$python_bin" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' \
+    "$worktree_arg"
+)" || fail 66 "cannot resolve worktree path: $worktree_arg"
 
-common_dir() {
-  local repo="$1"
-  local path
-  path="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)" || return 1
-  if [[ "$path" != /* ]]; then
-    path="$repo/$path"
+if registry_json="$(
+  cd "$rig_root"
+  "$gc_bin" worktree list "$worktree" --json
+)"; then
+  :
+else
+  status=$?
+  if [[ -n "$registry_json" ]]; then
+    printf '%s\n' "$registry_json" >&2
   fi
-  (cd "$path" && pwd -P)
-}
-
-rig_common="$(common_dir "$rig_root")" || fail 69 "cannot resolve rig Git common directory"
-worktree_common="$(common_dir "$worktree")" || fail 69 "path is not a registered Git worktree: $worktree"
-[[ "$rig_common" == "$worktree_common" ]] || fail 69 "worktree belongs to another repository: $worktree"
-
-if [[ -n "$(git -C "$worktree" status --porcelain=v1 --untracked-files=all)" ]]; then
-  fail 70 "dirty worktree preserved: $worktree"
+  fail "$status" "registry lookup failed; worktree preserved: $worktree"
 fi
 
-git -C "$rig_root" cat-file -e "$promoted_sha^{commit}" 2>/dev/null || fail 71 "promoted commit is unavailable: $promoted_sha"
-worktree_head="$(git -C "$worktree" rev-parse HEAD)"
-if ! git -C "$rig_root" merge-base --is-ancestor "$worktree_head" "$promoted_sha"; then
-  fail 72 "worktree HEAD $worktree_head is not reachable from promoted SHA $promoted_sha; preserved: $worktree"
+if registered_id="$(
+  printf '%s\n' "$registry_json" |
+    "$python_bin" -c '
+import json
+import sys
+
+expected_owner, expected_path = sys.argv[1:]
+try:
+    entries = json.load(sys.stdin)
+except (TypeError, ValueError) as exc:
+    raise SystemExit(f"cleanup-worktree: invalid registry JSON; preserved: {expected_path}: {exc}")
+if not isinstance(entries, list) or len(entries) != 1:
+    count = len(entries) if isinstance(entries, list) else "non-array"
+    raise SystemExit(
+        f"cleanup-worktree: registry lookup returned {count} entries; preserved: {expected_path}"
+    )
+entry = entries[0]
+if not isinstance(entry, dict):
+    raise SystemExit(f"cleanup-worktree: registry entry is not an object; preserved: {expected_path}")
+actual_owner = entry.get("owner")
+if actual_owner != expected_owner:
+    raise SystemExit(
+        f"cleanup-worktree: registry owner mismatch for {expected_path}; "
+        f"expected {expected_owner!r}, got {actual_owner!r}; preserved"
+    )
+actual_path = entry.get("path")
+if actual_path != expected_path:
+    raise SystemExit(
+        f"cleanup-worktree: registry path mismatch; expected {expected_path!r}, "
+        f"got {actual_path!r}; preserved"
+    )
+registered_id = entry.get("id")
+if not isinstance(registered_id, str) or not registered_id:
+    raise SystemExit(f"cleanup-worktree: registry id is missing; preserved: {expected_path}")
+print(registered_id)
+' "$owner_id" "$worktree"
+)"; then
+  :
+else
+  status=$?
+  fail "$status" "registry ownership validation failed; worktree preserved: $worktree"
 fi
 
-git -C "$rig_root" worktree remove "$worktree"
-printf 'removed formula-owned worktree: %s (owner=%s head=%s)\n' "$worktree" "$owner_id" "$worktree_head"
+reclaim=(
+  "$gc_bin" worktree reclaim "$registered_id"
+  --promoted-sha "$promoted_sha"
+  --json
+)
+if [[ "${GC_WORKTREE_CLEANUP_DRY_RUN:-0}" == "1" ]]; then
+  reclaim+=(--dry-run)
+fi
+
+cd "$rig_root"
+exec "${reclaim[@]}"

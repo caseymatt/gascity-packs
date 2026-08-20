@@ -7,21 +7,59 @@ candidate IDs through `{{pack_root}}/assets/scripts/thunderdome.py status --json
 invariant violation. Run `git fetch --no-tags origin "{{target_ref}}"`, resolve
 `FETCH_HEAD`, and fail closed if that exact SHA no longer equals the pinned base.
 
-Create or safely reuse the epoch worktree at
-`$GC_RIG_ROOT/worktrees/thunderdome-epoch-<epoch-id>` and branch
-`thunderdome/epoch-<epoch-id>` at exactly the pinned base. For candidates in the
-sealed order, verify each exact commit exists and descends from the base, then
-merge it with an explicit merge commit. Resolve textual conflicts while
-preserving all candidate behavior. Run formatting, compilation, schema/migration
-preflight, and fast tests required to make the aggregate PR structurally valid.
-Commit integration-only fixes on the epoch branch. Do not run binary search or
-remove a member to obtain green.
+Create or exactly reuse the registered epoch checkout with lifecycle ID
+`thunderdome-epoch-<epoch-id>`, owner `<epoch-id>`, attempt `1`, branch
+`thunderdome/epoch-<epoch-id>`, and path
+`$GC_RIG_ROOT/worktrees/thunderdome-epoch-<epoch-id>`:
 
-Push only the epoch branch. Derive the GitHub PR base branch by removing the
-validated `refs/heads/` prefix from `{{target_ref}}`; never pass a full ref where
-the GitHub API requires a branch name. Open exactly one aggregate PR and wait
-on GitHub's check/event surface rather than a sleep loop. Use branch protection
-and the merge queue when the repository exposes them.
+```bash
+epoch_worktree_id="thunderdome-epoch-<epoch-id>"
+epoch_worktree="${GC_RIG_ROOT:?}/worktrees/$epoch_worktree_id"
+gc worktree create "$epoch_worktree_id" \
+  --owner "<epoch-id>" --rig "${GC_RIG_NAME:?}" --path "$epoch_worktree" \
+  --base "{{base_sha}}" --branch "thunderdome/epoch-<epoch-id>" \
+  --attempt 1 --json
+```
+
+Require the returned `id`, `owner`, `rig`, `rig_root`, `path`, `attempt`,
+`base`, `branch`, and `head_sha` to match exactly. A pre-existing registration
+is reusable only when every field matches; otherwise fail closed. Persist
+`gc.worktree.id`, canonical `gc.worktree.path`, legacy `gc.work_dir`,
+`gc.cargo_target_dir`, and `gc.cargo_home` on the workflow root and read them
+back. Run every formatting, compilation, schema/migration preflight, and
+fast-test command from the returned `path` with the returned cache environment
+passed explicitly and unchanged.
+Require `cargo_target_dir` to equal
+`$GC_RIG_ROOT/worktrees/.cargo-targets/thunderdome-epoch-<epoch-id>/attempt-1`
+and `cargo_home` to equal `$GC_RIG_ROOT/.gc/cache/cargo-home`. The launcher
+supplies the shared sccache contract: require nonempty inherited
+`RUSTC_WRAPPER`, `SCCACHE_DIR`, and `SCCACHE_CACHE_SIZE`, do not rewrite them,
+and pass all three plus the registered Cargo paths explicitly to every Cargo
+command. Never inherit a different target, invent cache settings, or discover
+a sibling cache.
+
+For candidates in the sealed order, verify each exact commit exists and descends
+from the base, then merge it with an explicit merge commit. Resolve textual
+conflicts while preserving all candidate behavior. Commit integration-only
+fixes on the epoch branch. Do not run binary search or remove a member to obtain
+green.
+
+After the aggregate head is final and clean, publish it through the registered
+capability before opening the PR:
+
+```bash
+gc worktree publish "thunderdome-epoch-<epoch-id>" --json
+```
+
+Require returned `published_sha` to equal the checkout's current exact `HEAD`.
+Persist and read back `gc.thunderdome.published_ref=<published_ref>` and
+`gc.thunderdome.published_sha=<published_sha>` as teardown evidence. This is the
+only permitted publication operation; never invoke `git push` directly. Derive
+the GitHub PR base branch by removing the validated `refs/heads/` prefix from
+`{{target_ref}}`; never pass a full ref where the GitHub API requires a branch
+name. Open exactly one aggregate PR from the controlled `published_ref` and
+wait on GitHub's check/event surface rather than a sleep loop. Use branch
+protection and the merge queue when the repository exposes them.
 
 When the provider or account cannot protect this private branch, use the
 equivalent fail-closed path: require every configured PR check green, re-read
@@ -29,8 +67,10 @@ the exact base and candidate head SHAs immediately before merge, and merge with
 `gh pr merge --match-head-commit <candidate-head-sha>`. Record the unavailable
 protection capability and all check/merge evidence. Never push directly to the
 target, force push, merge a changed head, or treat missing checks as success.
-On any preflight, check, or merge failure, write a sanitized artifact, transition
-the epoch to `failed` with `failure_class` and `evidence_ref`, and fail this step.
+On any preflight, publication, check, or merge failure, write a sanitized
+artifact, transition the epoch to `failed` with `failure_class` and
+`evidence_ref`, and fail this step. Publication ambiguity is failure and must
+leave the registered checkout intact.
 
 After GitHub reports the PR merged, read the actual merge commit from GitHub,
 run `git fetch --no-tags origin "{{target_ref}}"`, resolve `FETCH_HEAD`, and

@@ -3,48 +3,79 @@ integration barriers have completed.
 
 Resolve the claimed step and `<workflow-root-id>`. Read the core-authored
 `gc.drain_manifest.v1` and require the drain control plus every manifest row to
-be closed pass. Read `gc.thunderdome.integration_worktree` and the exact
-40-character `gc.thunderdome.commit` from the workflow root. Require the path to
-be an absolute Git worktree for this repository, require a clean worktree, and
-require its `HEAD` to equal that recorded commit before running any command.
+be closed pass. The only valid lifecycle ID is
+`thunderdome-candidate-<workflow-root-id>`. Require that exact value in root
+`gc.worktree.id`, then read `gc.worktree.path`, `work_dir`, `gc.work_dir`,
+`gc.thunderdome.integration_worktree`, the exact 40-character
+`gc.thunderdome.commit`, `gc.thunderdome.published_ref`,
+`gc.thunderdome.published_sha`, `gc.cargo_target_dir`, and `gc.cargo_home`.
 Never reconstruct membership or candidate state from branches, labels,
 descriptions, or session logs.
 
+From `${GC_RIG_ROOT:?}`, run
+`gc worktree list "thunderdome-candidate-<workflow-root-id>" --json` and
+require an array containing exactly one entry. Require its `id`, `owner`, `rig`,
+`rig_root`, `path`, `attempt`, `base`, and `branch` to match the workflow root
+and integration contract exactly. Require `published=true`, a nonempty
+`published_ref`, and `head_sha`, `published_sha`,
+`gc.thunderdome.published_sha`, and `gc.thunderdome.commit` all to equal the
+same exact candidate commit. Require the root publication ref to equal registry
+`published_ref`. Any absent, malformed, ambiguous, unpublished, or mismatched
+entry fails closed before the gate.
+
+Require the registered path to equal
+`$GC_RIG_ROOT/worktrees/thunderdome-candidate-<workflow-root-id>`, to be an
+absolute clean worktree for this repository, and to have `HEAD` equal the
+recorded and published commit. Set `INTEGRATION_WORKTREE`,
+`CARGO_TARGET_DIR`, and `CARGO_HOME` only from registry `path`,
+`cargo_target_dir`, and `cargo_home`; require `gc.worktree.path`, `work_dir`,
+`gc.work_dir`, `gc.thunderdome.integration_worktree`, and the root cache
+metadata fields to match them exactly.
+
 This step is the only owner of the repository-wide Rust validation/check gate.
-Run `{{aggregate_rust_gate_command}}` exactly once, serially, from the integration
-worktree. Do not delegate it to an item worker, fan it out, background any part,
-or start a second aggregate Cargo process. Do not rerun the union of per-item
-commands: the configured repository gate is the single aggregate authority.
-A missing or blank rendered command is a configuration failure.
+Run `{{aggregate_rust_gate_command}}` exactly once, serially, from the
+integration worktree. Do not delegate it to an item worker, fan it out,
+background any part, or start a second aggregate Cargo process. Do not rerun
+the union of per-item commands: the configured repository gate is the single
+aggregate authority. A missing or blank rendered command is a configuration
+failure.
 
-Before the gate, create a workflow-owned target directory beside the integration
-worktrees, never inside a source checkout and never under `/tmp`:
+Before the gate, require the registry-owned cache paths to be canonical,
+absolute, writable, outside `/tmp`, and exactly:
 
-```sh
-WORKTREES_DIR=$(dirname "$INTEGRATION_WORKTREE")
-CARGO_TARGET_DIR="$WORKTREES_DIR/.cargo-targets/<workflow-root-id>/aggregate"
-mkdir -p "$CARGO_TARGET_DIR"
-CARGO_TARGET_DIR=$(cd "$CARGO_TARGET_DIR" && pwd -P)
-case "$CARGO_TARGET_DIR" in /tmp|/tmp/*) exit 1 ;; esac
-export CARGO_TARGET_DIR
+```text
+$GC_RIG_ROOT/worktrees/.cargo-targets/thunderdome-candidate-<workflow-root-id>/attempt-1
+$GC_RIG_ROOT/.gc/cache/cargo-home
 ```
 
-Substitute the resolved workflow root ID rather than the literal placeholder.
-Hard-fail if canonicalization escapes the workflow-owned
-`.cargo-targets/<workflow-root-id>/aggregate` directory, if the target is shared
-with an item worker or another workflow, or if it is not writable on disk. Never
-reuse another live `target` tree. A shared sccache or immutable prewarmed base is
-permitted only when supplied through the installed pack or provider environment;
-consume that contract unchanged. Do not discover sibling
-caches, invent cache environment variables, or configure shared writable cache
-state in this workflow.
+The candidate target must differ from every item, candidate, repair,
+verification, and epoch lifecycle target. Ignore inherited
+`CARGO_TARGET_DIR` and `CARGO_HOME`; do not create, guess, discover, or share a
+mutable target directory.
+
+The launcher supplies the shared sccache contract. Require nonempty inherited
+`RUSTC_WRAPPER`, `SCCACHE_DIR`, and `SCCACHE_CACHE_SIZE`, preserve their exact
+values, and launch the unchanged rendered aggregate command with
+`CARGO_TARGET_DIR="$CARGO_TARGET_DIR"`, `CARGO_HOME="$CARGO_HOME"`,
+`RUSTC_WRAPPER="$RUSTC_WRAPPER"`, `SCCACHE_DIR="$SCCACHE_DIR"`, and
+`SCCACHE_CACHE_SIZE="$SCCACHE_CACHE_SIZE"` explicitly in its process
+environment. Only Cargo home and sccache are shared; the target is isolated by
+lifecycle ID and attempt. Do not invent cache environment variables.
 
 Capture the rendered command, exit status, bounded sanitized output, duration,
-and canonical `CARGO_TARGET_DIR` in the aggregate verification evidence. On a
-nonzero exit, mark this step failed and do not write or approve the aggregate
-summary. On success, require the worktree to remain clean and require `HEAD` to
-still equal the pre-gate `gc.thunderdome.commit`. Record and read back
-`gc.thunderdome.validation_commit=<exact HEAD>` and
-`gc.thunderdome.validation_target_dir=<canonical CARGO_TARGET_DIR>` on the
-workflow root before closing pass. Do not edit source, create a commit, push,
-open a PR, enqueue the candidate, or close source beads in this step.
+canonical `CARGO_TARGET_DIR`, `CARGO_HOME`, and explicit sccache environment in
+the aggregate verification evidence. After the command, require `HEAD` to
+remain the pre-gate commit and run
+`gc worktree list "thunderdome-candidate-<workflow-root-id>" --json` again.
+Require the sole entry to retain that exact `head_sha`, `published_sha`, and
+`published_ref`, with a nonempty unchanged `published_at`. This second
+publication check is mandatory
+even when the gate fails, so a losing candidate remains durably recoverable.
+
+On a nonzero gate exit, mark this step failed only after recording the bounded
+result and verified publication; do not write or approve the aggregate summary.
+On success, additionally require the worktree to remain clean, then record and
+read back `gc.thunderdome.validation_commit=<exact HEAD>` and
+`gc.thunderdome.validation_target_dir=<registered cargo_target_dir>` on the
+workflow root before closing pass. Do not edit source, create a commit, open a
+PR, enqueue the candidate, or close source beads in this step.

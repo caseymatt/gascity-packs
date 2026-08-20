@@ -24,11 +24,38 @@ Run the pack-installed state adapter from the rig root:
   --json
 ```
 
-Use `{{pack_root}}/assets/scripts/thunderdome.py candidate enqueue`; do not create candidate
-beads directly. Parse the typed JSON result, require a candidate ID, and record
-it on the workflow root as `gc.thunderdome.candidate_id`. Re-run is safe only
-when the adapter returns the same active candidate key; conflicting active
-source membership is a hard failure.
+Use `{{pack_root}}/assets/scripts/thunderdome.py candidate enqueue`; do not
+create candidate beads directly. Before invoking it, read
+`gc.worktree.id=thunderdome-candidate-<workflow-root-id>` and
+`gc.worktree.owner=<workflow-root-id>` from the build workflow root. Hard-fail
+if either field is absent or differs from the exact typed workflow identity.
+
+Parse the adapter's typed JSON result and require a candidate ID. Immediately
+copy the exact lifecycle identity from the build root onto that returned typed
+candidate bead:
+
+```sh
+gc bd update "<candidate-id>" \
+  --set-metadata "gc.worktree.id=thunderdome-candidate-<workflow-root-id>" \
+  --set-metadata "gc.worktree.owner=<workflow-root-id>"
+gc bd show "<candidate-id>" --json
+```
+
+Accept either a JSON object or a one-element list from the readback, but
+hard-fail every other shape. Require the read-back bead to be the exact adapter
+candidate ID with `gc.thunderdome.kind=candidate`,
+`gc.thunderdome.state=queued`, and lifecycle ID and owner exactly equal to the
+build root values. Do not acknowledge or hand off the queued state, record the
+candidate ID, or close this step until that copy and readback verification
+succeeds. A lifecycle metadata update/readback failure leaves the build failed;
+never enqueue a typed candidate that landing cannot map back to its registered
+resource.
+
+After verified lifecycle stamping, record the returned candidate ID on the
+workflow root as `gc.thunderdome.candidate_id` and read it back. Re-run is safe
+only when the adapter returns the same active candidate key and the typed
+candidate retains the exact lifecycle ID and owner; conflicting active source
+membership or lifecycle identity is a hard failure.
 
 Do not push, create a PR, mutate trunk, or close source beads. The candidate
 enters `gc.thunderdome.state=queued`; epoch landing and verified promotion own

@@ -576,10 +576,16 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("focused behavioral tests only", item)
         self.assertIn("must not run", item)
         self.assertIn("CARGO_TARGET_DIR", item)
+        self.assertIn("CARGO_HOME", item)
         self.assertIn("<source-anchor-id>", item)
         self.assertIn("/tmp", item)
-        self.assertIn("installed pack or provider environment", item)
-        self.assertIn(".cargo-targets/<source-anchor-id>", item)
+        self.assertIn("RUSTC_WRAPPER", item)
+        self.assertIn("SCCACHE_DIR", item)
+        self.assertIn("SCCACHE_CACHE_SIZE", item)
+        self.assertIn(
+            ".cargo-targets/<source-anchor-id>/attempt-1",
+            item,
+        )
         self.assertIn("must not run", integrate)
         self.assertEqual(
             sum("{{aggregate_rust_gate_command}}" in asset for asset in build_assets),
@@ -588,10 +594,16 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("exactly once", validate)
         self.assertIn("serial", validate)
         self.assertIn("CARGO_TARGET_DIR", validate)
+        self.assertIn("CARGO_HOME", validate)
         self.assertIn("<workflow-root-id>", validate)
         self.assertIn("/tmp", validate)
-        self.assertIn("installed pack or provider environment", validate)
-        self.assertIn(".cargo-targets/<workflow-root-id>/aggregate", validate)
+        self.assertIn("RUSTC_WRAPPER", validate)
+        self.assertIn("SCCACHE_DIR", validate)
+        self.assertIn("SCCACHE_CACHE_SIZE", validate)
+        self.assertIn(
+            ".cargo-targets/thunderdome-candidate-<workflow-root-id>/attempt-1",
+            validate,
+        )
         self.assertIn("gc.thunderdome.validation_commit=<exact HEAD>", validate)
         summary = self.prompt("thunderdome-build/summarize.md")
         review = self.prompt("thunderdome-build/review.md")
@@ -599,6 +611,129 @@ class FormulaContractTests(unittest.TestCase):
         for downstream in (summary, review, enqueue):
             with self.subTest(downstream=downstream[:24]):
                 self.assertIn("gc.thunderdome.validation_commit", downstream)
+
+    def test_candidate_worktrees_use_central_lifecycle_topology_and_publication(self) -> None:
+        item_prepare = self.prompt("thunderdome-work-item/prepare-worktree.md")
+        item_implement = self.prompt("thunderdome-work-item/implement.md")
+        candidate_integrate = self.prompt("thunderdome-build/integrate.md")
+        candidate_validate = self.prompt("thunderdome-build/validate.md")
+        candidate_enqueue = self.prompt("thunderdome-build/enqueue.md")
+        lifecycle_assets = (
+            item_prepare,
+            item_implement,
+            candidate_integrate,
+            candidate_validate,
+            candidate_enqueue,
+        )
+
+        self.assertIn('gc worktree create "<source-anchor-id>"', item_prepare)
+        self.assertIn('--owner "<source-anchor-id>"', item_prepare)
+        self.assertIn('--base "$PINNED_BASE_SHA"', item_prepare)
+        self.assertIn(
+            "$GC_RIG_ROOT/worktrees/<source-anchor-id>",
+            item_prepare,
+        )
+        self.assertIn("gc.drain_control_id", item_prepare)
+        self.assertIn("gc.thunderdome.base_sha", item_prepare)
+        self.assertIn(
+            ".cargo-targets/<source-anchor-id>/attempt-1",
+            item_prepare,
+        )
+        self.assertIn("hard prepare failure", item_prepare)
+
+        self.assertIn(
+            'gc worktree list "<source-anchor-id>" --json',
+            item_implement,
+        )
+        self.assertIn(
+            'gc worktree publish "<source-anchor-id>" --json',
+            item_implement,
+        )
+        self.assertIn("published_ref", item_implement)
+        self.assertIn("published_sha", item_implement)
+
+        candidate_id = "thunderdome-candidate-<workflow-root-id>"
+        self.assertIn(f'gc worktree create "{candidate_id}"', candidate_integrate)
+        self.assertIn('--owner "<workflow-root-id>"', candidate_integrate)
+        self.assertIn('--base "<exact gc.thunderdome.base_sha>"', candidate_integrate)
+        self.assertIn(
+            f"$GC_RIG_ROOT/worktrees/{candidate_id}",
+            candidate_integrate,
+        )
+        self.assertIn(
+            f".cargo-targets/{candidate_id}/attempt-1",
+            candidate_integrate,
+        )
+        self.assertIn(
+            f'gc worktree publish "{candidate_id}" --json',
+            candidate_integrate,
+        )
+        self.assertIn("including a candidate that", candidate_integrate)
+        self.assertIn("later loses validation or review", candidate_integrate)
+        self.assertIn("Creation failure", candidate_integrate)
+        self.assertIn("gc.thunderdome.published_ref", candidate_integrate)
+        self.assertIn("gc.thunderdome.published_sha", candidate_integrate)
+        self.assertIn("gc.worktree.owner=<workflow-root-id>", candidate_integrate)
+        for lifecycle_fragment in (
+            "gc.worktree.id=thunderdome-candidate-<workflow-root-id>",
+            "gc.worktree.owner=<workflow-root-id>",
+            'gc bd update "<candidate-id>"',
+            'gc bd show "<candidate-id>" --json',
+            "JSON object or a one-element list",
+            "gc.thunderdome.kind=candidate",
+            "gc.thunderdome.state=queued",
+            "Do not acknowledge or hand off the queued state",
+            "gc.thunderdome.candidate_id",
+        ):
+            with self.subTest(lifecycle_fragment=lifecycle_fragment):
+                self.assertIn(lifecycle_fragment, candidate_enqueue)
+
+        for asset in (candidate_integrate, candidate_validate):
+            with self.subTest(asset=asset[:36]):
+                self.assertIn(
+                    f'gc worktree list "{candidate_id}" --json',
+                    asset,
+                )
+                self.assertIn("published_ref", asset)
+                self.assertIn("published_sha", asset)
+        self.assertIn("even when the gate fails", candidate_validate)
+        self.assertIn(
+            "losing candidate remains durably recoverable",
+            candidate_validate,
+        )
+
+        for metadata_key in (
+            "gc.worktree.id",
+            "gc.worktree.path",
+            "work_dir",
+            "gc.work_dir",
+            "gc.cargo_target_dir",
+            "gc.cargo_home",
+        ):
+            with self.subTest(metadata_key=metadata_key):
+                self.assertIn(metadata_key, item_prepare)
+                self.assertIn(metadata_key, candidate_integrate)
+
+        item_target = (
+            "$GC_RIG_ROOT/worktrees/.cargo-targets/"
+            "<source-anchor-id>/attempt-1"
+        )
+        candidate_target = (
+            "$GC_RIG_ROOT/worktrees/.cargo-targets/"
+            f"{candidate_id}/attempt-1"
+        )
+        self.assertNotEqual(item_target, candidate_target)
+        self.assertIn(item_target, item_prepare)
+        self.assertIn(candidate_target, candidate_integrate)
+        self.assertNotIn(candidate_target, item_prepare)
+        self.assertNotIn(item_target, candidate_integrate)
+        for asset in lifecycle_assets:
+            with self.subTest(direct_lifecycle=asset[:36]):
+                self.assertNotIn("git worktree add", asset)
+                self.assertNotIn("git worktree remove", asset)
+                self.assertNotIn("git worktree prune", asset)
+                self.assertNotIn("git push", asset)
+                self.assertNotIn("gc-code-storage", asset)
 
     def test_work_item_never_closes_its_source_anchor(self) -> None:
         data = self.formula("thunderdome-work-item")

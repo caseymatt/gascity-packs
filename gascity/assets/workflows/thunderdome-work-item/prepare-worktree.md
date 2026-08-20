@@ -1,6 +1,6 @@
 
-Resolve and publish the isolated worktree for this item. This is infrastructure
-setup only. Do not edit source files in the launcher checkout.
+Resolve and centrally register the isolated worktree for this item. This is
+infrastructure setup only. Do not edit source files in the launcher checkout.
 
 1. Read current step bead metadata and get `gc.root_bead_id`; hard-fail if it is
    missing. Read that do-work root with `gc bd show <root-bead-id> --json`. If
@@ -20,36 +20,70 @@ setup only. Do not edit source files in the launcher checkout.
      drain member
 3. Validate context path {{context_path}}, files ownership, and verification
    policy for the resolved source anchor.
-4. Create or reuse a deterministic git worktree at
-   `$(pwd)/worktrees/<source-anchor-id>`, based on the up-to-date remote
-   default branch — never the launcher's local `HEAD`, which may be behind
-   `origin`. If the path is missing:
-   - Resolve the remote default branch (do not hardcode `main`):
-     `DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')`.
-     If it is empty, fail closed — do not fall back to local `HEAD`.
-   - Fetch it so the base is current:
-     `git fetch --prune origin "$DEFAULT_BRANCH"`.
-   - Create the worktree detached at the freshly fetched tip:
-     `git worktree add "$WORKTREE" --detach "origin/$DEFAULT_BRANCH"`.
-   If the path exists but is not the worktree for this repository, fail closed.
-5. Before publishing the worktree, set `RIG_ROOT=$(pwd -P)` and copy the
-   launcher rig's `.gc/scripts` and `.gc/schemas` trees into `$WORKTREE/.gc`:
-   `mkdir -p "$WORKTREE/.gc/scripts" "$WORKTREE/.gc/schemas"`,
-   `cp -a "$RIG_ROOT/.gc/scripts/." "$WORKTREE/.gc/scripts/"`, and
-   `cp -a "$RIG_ROOT/.gc/schemas/." "$WORKTREE/.gc/schemas/"`.
-   Hard-fail if either source tree is absent. Then verify
-   `.gc/scripts/checks/build-artifact-valid.sh` and `.gc/schemas/build` exist
-   under
-   `$WORKTREE`; downstream controller checks execute from that isolated
-   worktree and must not depend on files outside it.
-6. Persist the absolute path on the source anchor with
-   `gc bd update <source-anchor-id> --set-metadata work_dir=<absolute worktree path>`.
-   For synthetic drain-unit convoys, never persist `work_dir` on the synthetic drain-unit convoy; the original drain member/source anchor is authoritative.
-   Verify the source anchor now has `work_dir` before closing this step with
-   `gc.outcome=pass`.
-7. Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open
-   descendant carrying that root's `gc.root_bead_id`. Use the same absolute
-   source-anchor worktree for every stamp, then read the downstream
-   implementation step back and verify both keys equal that path. Complete this
-   before closing this prepare step and before an implementation worker can
-   claim the downstream step; stale launcher paths are a prepare failure.
+4. Resolve the exact candidate base through the drain lineage; never choose a
+   branch tip or the launcher's local `HEAD`. Read `gc.drain_control_id` from
+   the do-work root, read that drain control's `gc.root_bead_id`, then read the
+   parent thunderdome-build root's `gc.thunderdome.base_sha`. Hard-fail unless
+   every link exists and the base is a full 40-character commit available in
+   this repository. Set `PINNED_BASE_SHA` to that exact value.
+5. Resolve and canonicalize `${GC_RIG_ROOT:?}`, require `${GC_RIG_NAME:?}`, and
+   verify the rig root is this repository. This item's lifecycle ID and owner
+   are both the exact `<source-anchor-id>`; use attempt `1`. Its only permitted
+   path is `$GC_RIG_ROOT/worktrees/<source-anchor-id>`.
+6. From `$GC_RIG_ROOT`, create or exactly reuse the centrally registered
+   lifecycle:
+
+   ```sh
+   gc worktree create "<source-anchor-id>" \
+     --owner "<source-anchor-id>" \
+     --rig "${GC_RIG_NAME:?}" \
+     --path "${GC_RIG_ROOT:?}/worktrees/<source-anchor-id>" \
+     --base "$PINNED_BASE_SHA" \
+     --attempt 1 \
+     --json
+   ```
+
+   Capture the JSON object. A missing command, helper failure, nonzero exit,
+   malformed JSON, or mismatched registered entry is a hard prepare failure;
+   do not stamp metadata or let implementation start. Require exact `id`,
+   `owner`, `rig`, `rig_root`, `path`, `attempt`, `base`, and `head_sha`
+   matches. Parse `path`, `cargo_target_dir`, and `cargo_home` from that object
+   rather than constructing cache paths in the prompt. Require their canonical
+   values to be, respectively:
+
+   - `$GC_RIG_ROOT/worktrees/<source-anchor-id>`
+   - `$GC_RIG_ROOT/worktrees/.cargo-targets/<source-anchor-id>/attempt-1`
+   - `$GC_RIG_ROOT/.gc/cache/cargo-home`
+
+   All three must be absolute, writable, outside `/tmp`, and the target must
+   not equal any other registered lifecycle's target. Confirm isolation with
+   `gc worktree list --rig "${GC_RIG_NAME:?}" --json`; no different registry ID
+   may report the same `path` or `cargo_target_dir`. Creation is idempotent only
+   when the complete registered identity matches exactly. Never bypass
+   `gc worktree create` with direct Git lifecycle or Code Storage helper calls.
+7. Copy the launcher rig's `.gc/scripts` and `.gc/schemas` trees into the
+   returned worktree path: create `$WORKTREE/.gc/scripts` and
+   `$WORKTREE/.gc/schemas`, copy from `$GC_RIG_ROOT/.gc/scripts` and
+   `$GC_RIG_ROOT/.gc/schemas`, and hard-fail if either source tree is absent.
+   Verify `.gc/scripts/checks/build-artifact-valid.sh` and `.gc/schemas/build`
+   exist under `$WORKTREE`; downstream controller checks execute from the
+   isolated worktree and must not depend on files outside it.
+8. Persist and read back these exact fields on the source anchor:
+
+   - `work_dir=<registered path>`
+   - `gc.worktree.id=<source-anchor-id>`
+   - `gc.worktree.path=<registered path>`
+   - `gc.work_dir=<registered path>`
+   - `gc.cargo_target_dir=<registered cargo_target_dir>`
+   - `gc.cargo_home=<registered cargo_home>`
+
+   For a synthetic drain-unit convoy, never persist lifecycle metadata on that
+   synthetic convoy; the original drain member/source anchor is authoritative.
+9. Stamp `work_dir`, `gc.worktree.id`, `gc.worktree.path`, `gc.work_dir`,
+   `gc.cargo_target_dir`, and `gc.cargo_home` with the same registered values
+   on the do-work root and every open descendant carrying that root's
+   `gc.root_bead_id`. Read the downstream implementation step back and require
+   every field to match the source anchor and registry before closing this
+   prepare step with `gc.outcome=pass`. Complete this before an implementation
+   worker can claim the downstream step; stale launcher paths or cache fields
+   are a prepare failure.

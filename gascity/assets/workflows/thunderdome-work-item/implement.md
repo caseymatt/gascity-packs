@@ -1,10 +1,7 @@
 
 Resolve `<source-anchor-id>` using the same rules as `prepare-worktree`. For a
 synthetic drain-unit convoy, the source anchor is the original drain member in
-`gc.drain_member_id`, not the synthetic convoy id. Read `work_dir` from the source anchor, never read `work_dir` from the synthetic drain-unit convoy,
-validate that it is an absolute existing git worktree, set `WORKTREE` to that
-path, then `cd "$WORKTREE"` before reading or editing source files. If
-`work_dir` is missing, invalid, or points at the launcher checkout, fail this step before editing.
+`gc.drain_member_id`, not the synthetic convoy id.
 
 Do not infer the source anchor from dependency ids such as the
 `prepare-worktree` step. Read the claimed step bead's `gc.root_bead_id`, read
@@ -13,15 +10,29 @@ metadata `gc.input_convoy_id`. Read that input convoy with `gc bd show
 <input-convoy-id> --json`; if the JSON output is a one-element list, unwrap the
 first element before reading metadata. If the input convoy has
 `gc.synthetic_kind=drain-unit-convoy`, use its `gc.drain_member_id` as the
-source anchor. Otherwise use the input convoy id as the source anchor. Then
-read the source anchor and use only its `work_dir` metadata as `WORKTREE`.
+source anchor. Otherwise use the input convoy id as the source anchor.
 
-`gc.work_dir` is the launcher rig root, not the implementation worktree. Use
-`gc.work_dir` only later to run `.gc/scripts/checks/build-artifact-valid.sh`.
-After resolving `WORKTREE`, run `cd "$WORKTREE"` and verify `pwd -P` equals
-`$WORKTREE` before any source read, source edit, test, file hash, `git add`, or
-`git commit`. If a command uses the launcher checkout path for source edits,
-verification, hashes, or commits, the step is invalid and must fail.
+Treat the central registry as lifecycle authority. Require
+`gc.worktree.id=<source-anchor-id>` and `gc.worktree.path=<registered path>` on
+the source anchor, then run
+`gc worktree list "<source-anchor-id>" --json` from `${GC_RIG_ROOT:?}`. Require
+an array containing exactly one entry whose `id`, `owner`, `rig`, `rig_root`,
+`attempt`, `base`, `path`, `cargo_target_dir`, and `cargo_home` match the
+prepare metadata and pinned drain base. Set `WORKTREE`, `CARGO_TARGET_DIR`, and
+`CARGO_HOME` only from those registry fields. Require the source anchor and
+claimed step values for `gc.worktree.path`, `work_dir`, `gc.work_dir`,
+`gc.cargo_target_dir`, and `gc.cargo_home` to equal the registry exactly.
+Missing, malformed, ambiguous, stale, or mismatched registry or bead data
+fails this step before editing.
+
+Require the registered worktree path to be absolute, to equal
+`$GC_RIG_ROOT/worktrees/<source-anchor-id>`, to be an existing worktree for
+this repository, and not to be the launcher checkout. Run `cd "$WORKTREE"` and
+verify `pwd -P` equals the registered path before any source read, source edit,
+test, file hash, `git add`, or `git commit`. If a command uses the launcher
+checkout path for source work, verification, hashes, or commits, the step is
+invalid and must fail. Use `${GC_RIG_ROOT:?}` directly for rig-owned scripts
+and artifacts; do not reinterpret a launcher current directory as the rig root.
 
 Do not edit files in the launcher checkout. Implement only the owned source
 anchor boundary, run sandboxed verification from inside the worktree, and make a
@@ -38,31 +49,32 @@ union of other items' commands. Formatting, workspace checks, broad tests, and
 the repository aggregate Rust gate belong exclusively to the serialized
 `thunderdome-build` validation step after the drain barrier.
 
-Before the first focused Cargo test, give this source anchor its own durable
-on-disk target directory beside the isolated worktrees:
+Before the first focused Cargo test, require the registry-provided
+`CARGO_TARGET_DIR` and `CARGO_HOME` to be canonical absolute writable
+directories with these exact values:
 
-```sh
-WORKTREES_DIR=$(dirname "$WORKTREE")
-CARGO_TARGET_DIR="$WORKTREES_DIR/.cargo-targets/<source-anchor-id>"
-mkdir -p "$CARGO_TARGET_DIR"
-CARGO_TARGET_DIR=$(cd "$CARGO_TARGET_DIR" && pwd -P)
-case "$CARGO_TARGET_DIR" in /tmp|/tmp/*) exit 1 ;; esac
-export CARGO_TARGET_DIR
+```text
+$GC_RIG_ROOT/worktrees/.cargo-targets/<source-anchor-id>/attempt-1
+$GC_RIG_ROOT/.gc/cache/cargo-home
 ```
 
-Substitute the resolved source anchor ID rather than the literal placeholder.
-Hard-fail if canonicalization escapes the source-owned
-`.cargo-targets/<source-anchor-id>` directory, if it resolves under `/tmp`, if
-it is not writable on disk, or if another item or aggregate gate uses the same
-directory. Ignore any inherited `CARGO_TARGET_DIR`; never point two workers at a
-shared live `target` tree or discover a target under a sibling worktree. A
-shared sccache or immutable prewarmed base is permitted only when it is already
-supplied through the installed pack or provider environment; consume that
-contract unchanged. Do not invent cache environment variables, copy a mutable
-target tree, or configure shared writable cache state in this workflow.
+Hard-fail if either path differs from its registered value, resolves under
+`/tmp`, or if the target equals another registered lifecycle's target. Ignore
+any inherited `CARGO_TARGET_DIR` or `CARGO_HOME`; never construct a target,
+discover one under a sibling worktree, or copy a mutable target tree.
 
-Record the canonical `CARGO_TARGET_DIR` and every focused test command with its
-observed result in `## Verification`.
+The launcher supplies the shared sccache contract. Require nonempty inherited
+`RUSTC_WRAPPER`, `SCCACHE_DIR`, and `SCCACHE_CACHE_SIZE`, do not rewrite their
+values, and launch every focused Cargo command with
+`CARGO_TARGET_DIR="$CARGO_TARGET_DIR"`, `CARGO_HOME="$CARGO_HOME"`,
+`RUSTC_WRAPPER="$RUSTC_WRAPPER"`, `SCCACHE_DIR="$SCCACHE_DIR"`, and
+`SCCACHE_CACHE_SIZE="$SCCACHE_CACHE_SIZE"` explicitly in that command's
+environment. The target is lifecycle-isolated; only Cargo home and sccache are
+shared. Do not invent any cache environment variable.
+
+Record the canonical `CARGO_TARGET_DIR`, `CARGO_HOME`, and every focused test
+command with its explicit cache environment and observed result in
+`## Verification`.
 
 Write or update the task summary with these schema-required body sections,
 using the exact `##` headings below in this order:
@@ -110,4 +122,46 @@ Trace front matter must use the validator shape exactly:
   requirements; do not use `approved` in `trace.coverage[].status` or the
   Markdown coverage table.
 
-Artifact validation: this step is gated by `.gc/scripts/checks/build-artifact-valid.sh`, which validates the summary recorded at `gc.implementation.summary_path` (fallbacks `gc.build.implementation_summary_path`, then `gc.var.summary_path`) against schema `gc.build.implementation-summary.v1`. Before closing this step, read the launcher rig root from the workflow root bead's `gc.work_dir`, then run the same validator locally from that rig root with `GC_BEAD_ID=<claimed-step-id> .gc/scripts/checks/build-artifact-valid.sh`; fix every reported validation error before setting `gc.outcome=pass`. On repair attempts (`gc.attempt` greater than 1), read the validator errors from `gc.attempt_log` on the validation loop control bead (the dependent of this step bead) and repair the summary in place instead of rewriting it. Two bounded repair attempts follow the first failure; exhausting them closes this stage with `gc.outcome=fail` and machine-readable validation errors that block downstream stages. Never ask questions in headless mode; record unresolved ambiguity inside the summary.
+After making each focused implementation or repair commit, require the
+worktree to be clean and resolve its full 40-character `HEAD`. Before that
+attempt can settle or hand off, publish the registered lifecycle from
+`${GC_RIG_ROOT:?}`:
+
+```sh
+gc worktree publish "<source-anchor-id>" --json
+```
+
+A missing command or helper, nonzero exit, malformed JSON, or publication
+mismatch fails the attempt; never continue with an unpublished commit. Require
+the returned `id`, `owner`, `path`, `head_sha`, `published`, `published_ref`,
+and `published_sha` to match the source anchor, registered worktree, and exact
+current `HEAD`, with nonempty `published_ref` and `published=true`. Run
+`gc worktree list "<source-anchor-id>" --json` and require its sole entry to
+contain the same `published_ref` and `published_sha` and a nonempty
+`published_at`. Persist
+and read back `gc.codestorage_ref=<published_ref>` and
+`gc.codestorage_sha=<published_sha>` on the source anchor and workflow root.
+Every later repair commit must be republished and replace that evidence with
+its new exact `HEAD`.
+
+Artifact validation: this step is gated by
+`.gc/scripts/checks/build-artifact-valid.sh`, which validates the summary
+recorded at `gc.implementation.summary_path` (fallbacks
+`gc.build.implementation_summary_path`, then `gc.var.summary_path`) against
+schema `gc.build.implementation-summary.v1`. Before closing this step, use the
+canonical `${GC_RIG_ROOT:?}` rather than bead `gc.work_dir`, then run the same
+validator locally from that rig root with
+`GC_BEAD_ID=<claimed-step-id> .gc/scripts/checks/build-artifact-valid.sh`; fix
+every reported validation error before setting `gc.outcome=pass`. On repair
+attempts with an explicit positive `gc.attempt` greater than 1, read the
+validator errors from `gc.attempt_log` on the validation loop control bead (the
+dependent of this step bead) and repair the summary in place instead of
+rewriting it. Two bounded repair attempts follow the first failure; exhausting
+them closes this stage with `gc.outcome=fail` and machine-readable validation
+errors that block downstream stages. Never ask questions in headless mode;
+record unresolved ambiguity inside the summary.
+
+Immediately before either pass or fail settlement, require `HEAD` to remain the
+registry's verified `published_sha`; if validation or repair changed `HEAD`,
+publish and verify it again first. Never close this step or hand off an item
+whose exact final commit is not durably published.

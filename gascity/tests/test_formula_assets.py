@@ -2206,7 +2206,6 @@ class FormulaAssetTests(unittest.TestCase):
                     self.assertIn(fragment, text)
 
         for relative_path in (
-            "assets/workflows/do-work/implement.md",
             "assets/workflows/do-work-item/implement-item.md",
             "assets/workflows/implementation-base/implement.md",
             "assets/workflows/implementation-item-base/implement-item.md",
@@ -2221,6 +2220,17 @@ class FormulaAssetTests(unittest.TestCase):
             ):
                 with self.subTest(asset=relative_path, fragment=fragment):
                     self.assertIn(fragment, text)
+
+        do_work_implement = (
+            root / "assets/workflows/do-work/implement.md"
+        ).read_text(encoding="utf-8")
+        for fragment in (
+            "use the already validated `RIG_ROOT` derived only from `GC_RIG_ROOT`",
+            'GC_BEAD_ID=<claimed-step-id> "$RIG_ROOT/.gc/scripts/checks/build-artifact-valid.sh"',
+            "fix every reported validation error before setting `gc.outcome=pass`",
+        ):
+            with self.subTest(asset="do-work/implement.md", fragment=fragment):
+                self.assertIn(fragment, do_work_implement)
 
     def test_build_finalizers_notify_the_operator_with_actionable_terminal_state(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
@@ -3727,15 +3737,26 @@ class FormulaAssetTests(unittest.TestCase):
             "gc.synthetic_kind",
             "gc.drain_member_id",
             "do not use the synthetic drain-unit convoy id as `<source-anchor-id>`",
-            "never persist `work_dir` on the synthetic drain-unit convoy",
+            "never persist these fields on the synthetic drain-unit convoy",
             "hard-fail if the selected source anchor id equals the synthetic input convoy id",
-            "worktrees/<source-anchor-id>",
-            "git worktree add",
-            "gc bd update <source-anchor-id> --set-metadata work_dir=",
-            "Stamp both `work_dir` and `gc.work_dir` on the do-work root and every open",
+            'RIG_ROOT=$(cd -- "$GC_RIG_ROOT" && pwd -P)',
+            "WORKTREE_ID=<source-anchor-id>",
+            'WORKTREE="$RIG_ROOT/worktrees/$WORKTREE_ID"',
+            'BASE=$(git -C "$RIG_ROOT" rev-parse --verify "origin/$DEFAULT_BRANCH^{commit}")',
+            'gc worktree create "$WORKTREE_ID" --owner "$OWNER_ID" --rig "$GC_RIG" '
+            '--path "$WORKTREE" --base "$BASE" --attempt 1 --json',
+            "inability to attach publication capability is a creation failure",
+            "`id`, `owner`, `rig`, `rig_root`, `path`, `attempt`, and `base`",
+            "`path`, `cargo_target_dir`, and `cargo_home`",
+            "$RIG_ROOT/worktrees/.cargo-targets/$WORKTREE_ID/attempt-1",
+            "$RIG_ROOT/.gc/cache/cargo-home",
+            "`gc.worktree.id=$WORKTREE_ID`, `gc.worktree.path=$WORKTREE`",
+            "`work_dir=$WORKTREE`, `gc.work_dir=$WORKTREE`",
+            "`gc.cargo_target_dir=<returned cargo_target_dir>`",
+            "`gc.cargo_home=<returned cargo_home>`",
+            "Stamp the same six fields on the do-work root and every open descendant",
             "before closing this prepare step",
             "Do not edit source files in the launcher checkout",
-            "set `RIG_ROOT=$(pwd -P)`",
             'cp -a "$RIG_ROOT/.gc/scripts/." "$WORKTREE/.gc/scripts/"',
             'cp -a "$RIG_ROOT/.gc/schemas/." "$WORKTREE/.gc/schemas/"',
             "`.gc/scripts/checks/build-artifact-valid.sh` and `.gc/schemas/build` exist",
@@ -3745,13 +3766,18 @@ class FormulaAssetTests(unittest.TestCase):
 
         implement = node_description(root, steps["implement"])
         for fragment in (
-            "Read `work_dir` from the source anchor",
-            "never read `work_dir` from the synthetic drain-unit convoy",
-            "Do not infer the source anchor from dependency ids",
-            "`gc.work_dir` is the launcher rig root, not the implementation worktree",
-            "if the JSON output is a one-element list, unwrap the",
+            "gc.worktree.id`, `gc.worktree.path`, `work_dir`, `gc.work_dir`",
+            "Never read these fields from a synthetic",
+            "Do not infer the source",
+            'RIG_ROOT=$(cd -- "$GC_RIG_ROOT" && pwd -P)',
+            'gc worktree list "$WORKTREE_ID" --rig "$GC_RIG" --json',
+            "array containing exactly one entry",
+            "$RIG_ROOT/worktrees/.cargo-targets/$WORKTREE_ID/attempt-1",
+            "export the registered unique Cargo target and home",
+            'export CARGO_TARGET_DIR="<registered cargo_target_dir>"',
+            'export CARGO_HOME="<registered cargo_home>"',
             "verify `pwd -P` equals",
-            "cd \"$WORKTREE\"",
+            'cd "$WORKTREE"',
             "fail this step before editing",
             "Do not edit files in the launcher checkout",
             "Leave the source anchor open",
@@ -3761,20 +3787,44 @@ class FormulaAssetTests(unittest.TestCase):
 
         close_source = node_description(root, steps["close-source-anchor"])
         for fragment in (
-            "Read `work_dir` from the source anchor",
+            "gc.worktree.id`, `gc.worktree.path`, `work_dir`, `gc.work_dir`",
             "close only `<source-anchor-id>`",
-            "handle both an object and a",
-            "`gc.work_dir` is the launcher rig",
-            "points at a worktree without the",
+            "both an object and a one-element list",
+            'RIG_ROOT=$(cd -- "$GC_RIG_ROOT" && pwd -P)',
+            'gc worktree list "$WORKTREE_ID" --rig "$GC_RIG" --json',
+            'gc worktree publish "$WORKTREE_ID" --json',
+            "whose `published_ref` is nonempty",
+            "`published_sha` equals both",
+            "There is no unavailable-publication bypass",
+            'gc worktree reclaim "$WORKTREE_ID" --json',
+            "`reclaimed=true` or `reclaimable=true`",
+            "For a denied or preserved result, `head_sha` may be empty",
+            "nonempty it must exactly match the validated entry",
+            "`reclaimed=true`, `reclaimable=true`, `dry_run=false`",
+            "`gc.worktree_reclaimed=false`",
+            "`gc.worktree_preservation_reason=<nonempty exact reclaim reason>`",
+            "For missing, malformed, or mismatched result JSON",
+            "preserve the checkout, record a sanitized nonempty reason",
+            "with the source anchor still open",
+            "a preserved checkout lacks its recorded reason",
             "gc bd show <source-anchor-id> --json",
-            "status=closed",
-            "gc.outcome=pass",
-            "if either check fails",
-            "anchor before closing this step",
-            "Do not close this step with pass while the source anchor remains open",
+            "`status=closed`, `gc.outcome=pass`",
         ):
             with self.subTest(step="close-source-anchor", fragment=fragment):
                 self.assertIn(fragment, close_source)
+
+        all_steps = "\n".join((prepare, implement, close_source))
+        for forbidden in (
+            "git worktree add",
+            "git worktree remove",
+            "git worktree prune",
+            "gc-code-storage",
+            "gc.codestorage=unavailable",
+            "$(pwd)/worktrees",
+            "RIG_ROOT=$(pwd -P)",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, all_steps)
 
     def test_wrapper_formulas_route_role_agents(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
