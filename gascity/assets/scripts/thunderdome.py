@@ -42,6 +42,7 @@ EPOCH_STATES = {
     "cancelled",
 }
 TERMINAL_EPOCH_STATES = {"promoted", "failed", "cancelled"}
+ABANDONED_EPOCH_STATES = {"failed", "cancelled"}
 ACTIVE_CANDIDATE_STATES = {"queued", "frozen", "landed"}
 SAFE_FAILURE_CLASSES = {
     "cancelled",
@@ -483,7 +484,7 @@ def project_state(
                 )
                 continue
             candidate_metadata = candidate.get("metadata") or {}
-            if candidate_metadata.get(PREFIX + "epoch_id") != epoch_id:
+            if state not in ABANDONED_EPOCH_STATES and candidate_metadata.get(PREFIX + "epoch_id") != epoch_id:
                 violations.append(
                     _violation(
                         "candidate_epoch_mismatch",

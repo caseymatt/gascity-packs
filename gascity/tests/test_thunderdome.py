@@ -411,6 +411,28 @@ class ProjectionTests(unittest.TestCase):
         self.assertIn("epoch_membership_hash_mismatch", {v["code"] for v in result["violations"]})
         self.assertIn("epoch_candidate_missing", {v["code"] for v in result["violations"]})
 
+    def test_projection_allows_candidate_recovery_from_cancelled_epoch(self) -> None:
+        candidate = self.candidate_record(state="frozen")
+        candidate["metadata"]["gc.thunderdome.epoch_id"] = "sp-epoch-b"
+        cancelled = self.epoch_record()
+        cancelled["metadata"] = self.module.transition_metadata(
+            cancelled["metadata"],
+            "cancelled",
+            now=LATER,
+            evidence={"failure_class": "cancelled", "evidence_ref": "artifact://cancelled"},
+        )
+        replacement = self.epoch_record()
+        replacement["id"] = "sp-epoch-b"
+
+        result = self.module.project_state(
+            [candidate, cancelled, replacement],
+            now=LATER,
+            source_states={"sp-source-a": "in_progress"},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("candidate_epoch_mismatch", {v["code"] for v in result["violations"]})
+
     def test_projection_detects_candidate_epoch_mismatch(self) -> None:
         candidate = self.candidate_record(state="frozen")
         candidate["metadata"]["gc.thunderdome.epoch_id"] = "sp-other-epoch"
