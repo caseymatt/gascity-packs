@@ -27,6 +27,13 @@ PREFIX = "gc.thunderdome."
 KIND = PREFIX + "kind"
 STATE = PREFIX + "state"
 HISTORY = PREFIX + "history"
+RECORD = PREFIX + "record"
+CANDIDATE_ID = PREFIX + "candidate_id"
+ACTIVE_EPOCH = PREFIX + "active_epoch"
+PROMOTED_BY = PREFIX + "promoted_by"
+EMITTED_SEQ = PREFIX + "emitted_seq"
+DISPATCH_INTENT = PREFIX + "dispatch_intent"
+MAX_HISTORY = 64
 CANDIDATE_STATES = {"queued", "frozen", "landed", "verified", "superseded", "rejected"}
 EPOCH_STATES = {
     "assembling",
@@ -36,6 +43,7 @@ EPOCH_STATES = {
     "repairing",
     "verified",
     "promoting",
+    "promotion_committing",
     "promotion_failed",
     "promoted",
     "failed",
@@ -82,7 +90,8 @@ EPOCH_TRANSITIONS: dict[str, set[str]] = {
     "red": {"repairing", "failed", "cancelled"},
     "repairing": {"verifying", "red", "failed", "cancelled"},
     "verified": {"promoting", "failed"},
-    "promoting": {"promoted", "promotion_failed", "failed"},
+    "promoting": {"promotion_committing", "promotion_failed", "failed"},
+    "promotion_committing": {"promoted"},
     "promotion_failed": {"promoting", "failed", "cancelled"},
     "promoted": set(),
     "failed": set(),
@@ -105,12 +114,8 @@ STRUCTURED_ID_METADATA_KEYS = {
 }
 
 
-def decode_thunderdome_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    result = copy.deepcopy(dict(record))
-    metadata = result.get("metadata")
-    if not isinstance(metadata, Mapping):
-        return result
-    decoded = dict(metadata)
+def _decode_structured_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    decoded = copy.deepcopy(dict(metadata))
     for key in [*sorted(STRUCTURED_ID_METADATA_KEYS), HISTORY]:
         if key not in decoded:
             continue
@@ -128,8 +133,73 @@ def decode_thunderdome_record(record: Mapping[str, Any]) -> dict[str, Any]:
         elif any(not isinstance(item, str) or not item.strip() for item in value):
             raise CommandError(f"metadata field {key} must contain non-empty strings")
         decoded[key] = value
-    result["metadata"] = decoded
+    return decoded
+
+
+def decode_thunderdome_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(dict(record))
+    metadata = result.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return result
+    raw = _decode_structured_metadata(metadata)
+    result["_thunderdome_raw_metadata"] = copy.deepcopy(raw)
+    payload = raw.get(RECORD)
+    if payload in (None, ""):
+        result["metadata"] = raw
+        return result
+    if not isinstance(payload, str):
+        raise CommandError(f"metadata field {RECORD} must be canonical JSON text")
+    try:
+        envelope_value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise CommandError(f"metadata field {RECORD} contains malformed JSON") from exc
+    if not isinstance(envelope_value, Mapping):
+        raise CommandError(f"metadata field {RECORD} must decode to an object")
+    envelope = _decode_structured_metadata(envelope_value)
+    if canonical_json(envelope) != payload:
+        raise CommandError(f"metadata field {RECORD} is not canonical JSON")
+    merged = dict(raw)
+    merged.update(envelope)
+    merged[RECORD] = payload
+    result["metadata"] = merged
     return result
+
+
+def record_metadata(record: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = record.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return {}
+    payload = metadata.get(RECORD)
+    if payload in (None, ""):
+        return _decode_structured_metadata(metadata)
+    if not isinstance(payload, str):
+        raise CommandError(f"metadata field {RECORD} must be canonical JSON text")
+    try:
+        envelope_value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise CommandError(f"metadata field {RECORD} contains malformed JSON") from exc
+    if not isinstance(envelope_value, Mapping):
+        raise CommandError(f"metadata field {RECORD} must decode to an object")
+    envelope = _decode_structured_metadata(envelope_value)
+    if canonical_json(envelope) != payload:
+        raise CommandError(f"metadata field {RECORD} is not canonical JSON")
+    return envelope
+
+
+def authoritative_value(record: Mapping[str, Any]) -> str:
+    metadata = record.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ""
+    value = metadata.get(RECORD, "")
+    return value if isinstance(value, str) else ""
+
+
+def raw_metadata(record: Mapping[str, Any]) -> dict[str, Any]:
+    raw = record.get("_thunderdome_raw_metadata")
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    metadata = record.get("metadata")
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -141,6 +211,102 @@ def canonical_json(value: Any) -> str:
 
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+def bead_prefix(bead_ids: Iterable[str]) -> str:
+    prefixes: set[str] = set()
+    for bead_id in require_nonempty_ids("bead_ids", bead_ids):
+        for marker in ("-tdc-", "-tde-", "-thunderdome-control"):
+            if marker in bead_id:
+                prefix = bead_id.split(marker, 1)[0]
+                break
+        else:
+            prefix, separator, suffix = bead_id.partition("-")
+            if not separator or not prefix or not suffix:
+                raise StateError(f"cannot derive rig bead prefix from {bead_id!r}")
+        prefixes.add(prefix)
+    if len(prefixes) != 1:
+        raise StateError("Thunderdome records must belong to one rig bead prefix")
+    return next(iter(prefixes))
+
+
+def candidate_record_id(metadata: Mapping[str, Any]) -> str:
+    prefix = bead_prefix(metadata.get(PREFIX + "source_beads", []))
+    return f"{prefix}-tdc-{str(metadata.get(PREFIX + 'candidate_key', ''))[:12]}"
+
+
+def epoch_record_id(metadata: Mapping[str, Any]) -> str:
+    prefix = bead_prefix(metadata.get(PREFIX + "candidate_ids", []))
+    return f"{prefix}-tde-{str(metadata.get(PREFIX + 'membership_hash', ''))[:12]}"
+
+
+def control_record_id(bead_ids: Iterable[str]) -> str:
+    return f"{bead_prefix(bead_ids)}-thunderdome-control"
+
+
+def discovery_mirrors(envelope: Mapping[str, Any]) -> dict[str, str]:
+    mirrors = {
+        PREFIX + "schema": str(envelope.get(PREFIX + "schema", "")),
+        KIND: str(envelope.get(KIND, "")),
+    }
+    kind = envelope.get(KIND)
+    if kind == "candidate":
+        mirrors[PREFIX + "candidate_key"] = str(envelope.get(PREFIX + "candidate_key", ""))
+    elif kind == "epoch":
+        mirrors[PREFIX + "membership_hash"] = str(envelope.get(PREFIX + "membership_hash", ""))
+    return mirrors
+
+
+def stored_metadata(envelope: Mapping[str, Any]) -> dict[str, str]:
+    return {RECORD: canonical_json(envelope), **discovery_mirrors(envelope)}
+
+
+def epoch_intent(epoch_id: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "epoch_id": epoch_id,
+        "candidate_ids": require_nonempty_ids(
+            "candidate_ids", metadata.get(PREFIX + "candidate_ids", [])
+        ),
+        "membership_hash": str(metadata.get(PREFIX + "membership_hash", "")),
+        "base_sha": require_sha("base_sha", str(metadata.get(PREFIX + "base_sha", ""))),
+        "target_ref": require_ref("target_ref", str(metadata.get(PREFIX + "target_ref", ""))),
+        "created_at": str(metadata.get(PREFIX + "created_at", "")),
+    }
+
+
+def parse_epoch_intent(payload: str) -> dict[str, Any]:
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise StateError("active epoch intent is malformed") from exc
+    if not isinstance(value, Mapping) or canonical_json(value) != payload:
+        raise StateError("active epoch intent is not canonical JSON")
+    required = {
+        "schema_version",
+        "epoch_id",
+        "candidate_ids",
+        "membership_hash",
+        "base_sha",
+        "target_ref",
+        "created_at",
+    }
+    if set(value) != required or value.get("schema_version") != "1":
+        raise StateError("active epoch intent has an unsupported shape")
+    candidates = require_nonempty_ids("candidate_ids", value.get("candidate_ids", []))
+    if candidates != value.get("candidate_ids") or digest(candidates) != value.get("membership_hash"):
+        raise StateError("active epoch intent membership is not canonical")
+    epoch_id = str(value.get("epoch_id", "")).strip()
+    if not epoch_id or any(character.isspace() for character in epoch_id):
+        raise StateError("active epoch intent has an invalid epoch ID")
+    if bead_prefix([epoch_id]) != bead_prefix(candidates):
+        raise StateError("active epoch intent epoch ID belongs to another rig")
+    new_epoch_metadata(
+        candidate_ids=candidates,
+        base_sha=str(value.get("base_sha", "")),
+        target_ref=str(value.get("target_ref", "")),
+        now=str(value.get("created_at", "")),
+    )
+    return dict(value)
 
 
 def require_sha(name: str, value: str) -> str:
@@ -251,7 +417,7 @@ def validate_epoch_candidates(
     seen_sources: set[str] = set()
     for record in records:
         candidate_id = str(record.get("id", ""))
-        metadata = record.get("metadata") or {}
+        metadata = record_metadata(record)
         if metadata.get(KIND) != "candidate" or metadata.get(STATE) not in {"queued", "frozen"}:
             raise StateError(f"candidate {candidate_id} is not queueable")
         if metadata.get(PREFIX + "base_sha") != exact_base:
@@ -310,7 +476,6 @@ def _validate_transition_evidence(
         if target == "frozen" and "epoch_id" not in evidence:
             raise StateError("candidate frozen transition requires epoch_id")
         return
-
     if target == "landed" and "landed_sha" not in evidence:
         raise StateError("epoch landed transition requires landed_sha")
     if target == "red":
@@ -365,15 +530,17 @@ def transition_metadata(
     _validate_transition_evidence(result, kind, current, target_state, safe_evidence)
 
     history = copy.deepcopy(result.get(HISTORY, []))
+    next_seq = int(history[-1].get("seq", -1)) + 1 if history else 0
     history.append(
         {
-            "seq": len(history),
+            "seq": next_seq,
             "from": current,
             "to": target_state,
             "at": now,
             "evidence": safe_evidence,
         }
     )
+    history = history[-MAX_HISTORY:]
     result[STATE] = target_state
     result[PREFIX + "updated_at"] = now
     result[HISTORY] = history
@@ -416,7 +583,7 @@ def project_state(
     epochs: dict[str, Mapping[str, Any]] = {}
     violations: list[dict[str, str]] = []
     for record in records:
-        metadata = record.get("metadata") or {}
+        metadata = record_metadata(record)
         if metadata.get(PREFIX + "schema") != SCHEMA:
             continue
         bead_id = str(record.get("id", ""))
@@ -427,7 +594,7 @@ def project_state(
 
     source_to_candidates: dict[str, list[str]] = defaultdict(list)
     for candidate_id, record in candidates.items():
-        metadata = record.get("metadata") or {}
+        metadata = record_metadata(record)
         state = metadata.get(STATE)
         for source_id in metadata.get(PREFIX + "source_beads", []):
             if state in ACTIVE_CANDIDATE_STATES:
@@ -464,12 +631,13 @@ def project_state(
         "repairing": "landed",
         "verified": "verified",
         "promoting": "verified",
+        "promotion_committing": "verified",
         "promotion_failed": "verified",
         "promoted": "verified",
     }
     epoch_views: list[dict[str, Any]] = []
     for epoch_id, record in epochs.items():
-        metadata = record.get("metadata") or {}
+        metadata = record_metadata(record)
         state = str(metadata.get(STATE, ""))
         candidate_ids = metadata.get(PREFIX + "candidate_ids", [])
         if not isinstance(candidate_ids, list) or metadata.get(PREFIX + "membership_hash") != digest(sorted(candidate_ids)):
@@ -483,7 +651,7 @@ def project_state(
                     _violation("epoch_candidate_missing", epoch_id, f"epoch references missing candidate {candidate_id}")
                 )
                 continue
-            candidate_metadata = candidate.get("metadata") or {}
+            candidate_metadata = record_metadata(candidate)
             if state not in ABANDONED_EPOCH_STATES and candidate_metadata.get(PREFIX + "epoch_id") != epoch_id:
                 violations.append(
                     _violation(
@@ -504,11 +672,11 @@ def project_state(
         landed_sha = metadata.get(PREFIX + "landed_sha", "")
         verified_sha = metadata.get(PREFIX + "verified_sha", "")
         release_sha = metadata.get(PREFIX + "release_sha", "")
-        if state in {"verified", "promoting", "promotion_failed", "promoted"} and verified_sha != landed_sha:
+        if state in {"verified", "promoting", "promotion_committing", "promotion_failed", "promoted"} and verified_sha != landed_sha:
             violations.append(
                 _violation("epoch_verified_sha_mismatch", epoch_id, "verified SHA does not match latest landed SHA")
             )
-        if state == "promoted" and release_sha != verified_sha:
+        if state in {"promotion_committing", "promoted"} and release_sha != verified_sha:
             violations.append(
                 _violation("epoch_release_sha_mismatch", epoch_id, "release SHA does not match verified SHA")
             )
@@ -532,22 +700,25 @@ def project_state(
             }
         )
 
+    candidate_metadata = {
+        candidate_id: record_metadata(record) for candidate_id, record in candidates.items()
+    }
     queue_counts = Counter(
-        str((record.get("metadata") or {}).get(STATE, "unknown")) for record in candidates.values()
+        str(metadata.get(STATE, "unknown")) for metadata in candidate_metadata.values()
     )
     queued_ages = [
         age
-        for record in candidates.values()
-        if (record.get("metadata") or {}).get(STATE) == "queued"
-        for age in [_age_seconds((record.get("metadata") or {}).get(PREFIX + "created_at"), now)]
+        for metadata in candidate_metadata.values()
+        if metadata.get(STATE) == "queued"
+        for age in [_age_seconds(metadata.get(PREFIX + "created_at"), now)]
         if age is not None
     ]
     stale_queued_ids = sorted(
         candidate_id
-        for candidate_id, record in candidates.items()
-        if (record.get("metadata") or {}).get(STATE) == "queued"
+        for candidate_id, metadata in candidate_metadata.items()
+        if metadata.get(STATE) == "queued"
         and trunk_sha
-        and (record.get("metadata") or {}).get(PREFIX + "base_sha") != trunk_sha
+        and metadata.get(PREFIX + "base_sha") != trunk_sha
     )
     promoted = sorted(
         (view for view in epoch_views if view["state"] == "promoted"),
@@ -558,10 +729,19 @@ def project_state(
         "sha": promoted[-1]["release_sha"] if promoted else "",
         "ref": promoted[-1]["release_ref"] if promoted else "",
     }
-    violations.sort(key=lambda item: (item["code"], item["entity"], item["message"]))
     active_epochs = sorted(
-        (view for view in epoch_views if view["state"] not in TERMINAL_EPOCH_STATES), key=lambda view: view["id"]
+        (view for view in epoch_views if view["state"] not in TERMINAL_EPOCH_STATES),
+        key=lambda view: view["id"],
     )
+    if len(active_epochs) > 1:
+        violations.append(
+            _violation(
+                "multiple_active_epochs",
+                ",".join(view["id"] for view in active_epochs),
+                "more than one epoch is active",
+            )
+        )
+    violations.sort(key=lambda item: (item["code"], item["entity"], item["message"]))
     recent_epochs = sorted(epoch_views, key=lambda view: view["id"])
     return {
         "schema_version": "1",
@@ -600,14 +780,14 @@ def plan_reconcile(
     active_epoch_ids = sorted(
         str(record.get("id", ""))
         for record in records
-        if (record.get("metadata") or {}).get(PREFIX + "schema") == SCHEMA
-        and (record.get("metadata") or {}).get(KIND) == "epoch"
-        and (record.get("metadata") or {}).get(STATE) not in TERMINAL_EPOCH_STATES
+        if record_metadata(record).get(PREFIX + "schema") == SCHEMA
+        and record_metadata(record).get(KIND) == "epoch"
+        and record_metadata(record).get(STATE) not in TERMINAL_EPOCH_STATES
     )
     queued: list[tuple[int, str]] = []
     stale_candidate_ids: list[str] = []
     for record in records:
-        metadata = record.get("metadata") or {}
+        metadata = record_metadata(record)
         if (
             metadata.get(PREFIX + "schema") != SCHEMA
             or metadata.get(KIND) != "candidate"
@@ -712,13 +892,21 @@ class BeadClient:
             args.extend(["--rig", self._rig])
         return args
 
-    def run(self, args: Sequence[str], *, expect_json: bool = True) -> Any:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        expect_json: bool = True,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> Any:
         env = os.environ.copy()
-        env.setdefault("BD_IGNORE_SCHEMA_SKEW", "1")
+        env.update(extra_env or {})
         completed = self._runner([*self._prefix(), *args], env)
         if completed.returncode != 0:
             operation = " ".join(args[:2])
-            raise CommandError(f"gc {operation} failed with exit {completed.returncode}; inspect command diagnostics locally")
+            raise CommandError(
+                f"gc {operation} failed with exit {completed.returncode}; inspect command diagnostics locally"
+            )
         if not expect_json:
             return completed.stdout
         try:
@@ -740,62 +928,227 @@ class BeadClient:
                 "--json",
             ]
         )
+        if not isinstance(result, list):
+            raise CommandError("gc bd list returned a non-array result")
         return [decode_thunderdome_record(record) for record in result]
 
     def show(self, bead_ids: Sequence[str]) -> list[dict[str, Any]]:
         if not bead_ids:
             return []
-        return [
-            decode_thunderdome_record(record)
-            for record in self.run(["bd", "show", *bead_ids, "--json"])
-        ]
+        result = self.run(["bd", "show", *bead_ids, "--json"])
+        rows = result if isinstance(result, list) else [result]
+        return [decode_thunderdome_record(record) for record in rows]
 
-    def create_record(self, title: str, label: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
-        created = self.run(
+    def metadata_cas(self, bead_id: str, key: str, expected: str, value: str) -> bool:
+        result = self.run(
             [
                 "bd",
-                "create",
-                title,
-                "--type",
-                "task",
-                "--priority",
-                "1",
-                "--labels",
-                label,
-                "--metadata",
-                canonical_json(metadata),
+                "metadata-cas",
+                bead_id,
+                "--key",
+                key,
+                "--expected",
+                expected,
+                "--value",
+                value,
                 "--json",
             ]
         )
-        record = created[0] if isinstance(created, list) else created
-        updated = self.run(
-            [
-                "bd",
-                "update",
-                str(record["id"]),
-                "--status",
-                "in_progress",
-                "--json",
-            ]
-        )
-        record = updated[0] if isinstance(updated, list) else updated
-        return decode_thunderdome_record(record)
+        if not isinstance(result, Mapping) or not isinstance(result.get("swapped"), bool):
+            raise CommandError("gc bd metadata-cas returned an invalid result")
+        return bool(result["swapped"])
 
-    def update_metadata(self, bead_id: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
-        updated = self.run(
-            ["bd", "update", bead_id, "--metadata", canonical_json(metadata), "--json"]
-        )
-        record = updated[0] if isinstance(updated, list) else updated
-        return decode_thunderdome_record(record)
+    def converge_status(self, bead_id: str, status: str, *, reason: str = "") -> dict[str, Any]:
+        records = self.show([bead_id])
+        if not records:
+            raise StateError(f"bead {bead_id} not found")
+        record = records[0]
+        current = str(record.get("status", ""))
+        if current == status:
+            return record
+        if current == "closed":
+            raise StateError(f"bead {bead_id} is already closed with conflicting lifecycle evidence")
+        if status == "closed":
+            if not reason:
+                raise StateError("closing a bead requires a reason")
+            updated = self.run(["bd", "close", bead_id, "--reason", reason, "--json"])
+        else:
+            updated = self.run(["bd", "update", bead_id, "--status", status, "--json"])
+        row = updated[0] if isinstance(updated, list) else updated
+        return decode_thunderdome_record(row)
+
+    @staticmethod
+    def _immutable_identity(envelope: Mapping[str, Any]) -> dict[str, Any]:
+        kind = envelope.get(KIND)
+        common = {
+            PREFIX + "schema": envelope.get(PREFIX + "schema"),
+            KIND: kind,
+        }
+        if kind == "candidate":
+            keys = (
+                PREFIX + "candidate_key",
+                PREFIX + "source_beads",
+                PREFIX + "delivery_unit",
+                PREFIX + "commit",
+                PREFIX + "base_sha",
+                PREFIX + "summary_path",
+                PREFIX + "review_path",
+            )
+        elif kind == "epoch":
+            keys = (
+                PREFIX + "candidate_ids",
+                PREFIX + "membership_hash",
+                PREFIX + "base_sha",
+                PREFIX + "target_ref",
+            )
+        elif kind == "control":
+            keys = ()
+        else:
+            raise StateError("unsupported deterministic Thunderdome record kind")
+        return {**common, **{key: envelope.get(key) for key in keys}}
+
+    @staticmethod
+    def _legacy_envelope(record: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: copy.deepcopy(value)
+            for key, value in raw_metadata(record).items()
+            if isinstance(key, str) and key.startswith(PREFIX) and key != RECORD
+        }
+
+
+
+    def repair_mirrors(
+        self, record: Mapping[str, Any], envelope: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        bead_id = str(record.get("id", ""))
+        raw = raw_metadata(record)
+        for key, desired in discovery_mirrors(envelope).items():
+            current = raw.get(key, "")
+            if current == desired:
+                continue
+            if not isinstance(current, str):
+                raise StateError(f"record {bead_id} has non-string discovery mirror {key}")
+            if not self.metadata_cas(bead_id, key, current, desired):
+                refreshed = self.show([bead_id])
+                if not refreshed or raw_metadata(refreshed[0]).get(key, "") != desired:
+                    raise StateError(f"record {bead_id} has conflicting discovery mirror {key}")
+                record = refreshed[0]
+            raw[key] = desired
+        refreshed = self.show([bead_id])
+        return refreshed[0] if refreshed else dict(record)
+
+    def authoritative_reread(
+        self, bead_id: str, *, migrate: bool = True
+    ) -> dict[str, Any]:
+        records = self.show([bead_id])
+        if not records:
+            raise StateError(f"bead {bead_id} not found")
+        record = records[0]
+        metadata = record_metadata(record)
+        kind = metadata.get(KIND)
+        payload = authoritative_value(record)
+        if not payload and migrate and kind in {"candidate", "epoch"}:
+            if os.environ.get("GC_THUNDERDOME_ALLOW_LEGACY_MIGRATION") != "1":
+                raise StateError(
+                    f"legacy record {bead_id} requires a quiescent one-time migration"
+                )
+            envelope = self._legacy_envelope(record)
+            canonical = canonical_json(envelope)
+            if not self.metadata_cas(bead_id, RECORD, "", canonical):
+                return self.authoritative_reread(bead_id, migrate=False)
+            record = self.show([bead_id])[0]
+            metadata = record_metadata(record)
+            payload = authoritative_value(record)
+        if kind in {"candidate", "epoch"} and not payload:
+            raise StateError(f"record {bead_id} has no authoritative envelope")
+        if kind in {"candidate", "epoch"}:
+            return self.repair_mirrors(record, metadata)
+        return record
+
+    def cas_envelope(
+        self,
+        record: Mapping[str, Any],
+        updated_envelope: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        bead_id = str(record.get("id", ""))
+        expected = authoritative_value(record)
+        if not expected:
+            record = self.authoritative_reread(bead_id)
+            expected = authoritative_value(record)
+        value = canonical_json(updated_envelope)
+        if expected == value:
+            return dict(record)
+        if not self.metadata_cas(bead_id, RECORD, expected, value):
+            return None
+        return self.authoritative_reread(bead_id, migrate=False)
+
+    def create_or_validate(
+        self,
+        bead_id: str,
+        title: str,
+        label: str,
+        envelope: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        existing: list[dict[str, Any]] = []
+        try:
+            existing = self.show([bead_id])
+        except CommandError:
+            existing = []
+        if not existing:
+            try:
+                created = self.run(
+                    [
+                        "bd",
+                        "create",
+                        title,
+                        "--id",
+                        bead_id,
+                        "--type",
+                        "task",
+                        "--priority",
+                        "1",
+                        "--status",
+                        "in_progress",
+                        "--labels",
+                        label,
+                        "--metadata",
+                        canonical_json(
+                            stored_metadata(envelope)
+                            if envelope.get(KIND) != "control"
+                            else dict(envelope)
+                        ),
+                        "--json",
+                    ]
+                )
+                row = created[0] if isinstance(created, list) else created
+                existing = [decode_thunderdome_record(row)]
+            except CommandError as create_error:
+                try:
+                    existing = self.show([bead_id])
+                except CommandError:
+                    raise create_error
+        if not existing:
+            raise StateError(f"deterministic record {bead_id} was not materialized")
+        record = existing[0]
+        current = record_metadata(record)
+        if self._immutable_identity(current) != self._immutable_identity(envelope):
+            raise StateError(f"deterministic record {bead_id} has conflicting immutable payload")
+        if current.get(KIND) in {"candidate", "epoch"}:
+            record = self.authoritative_reread(bead_id)
+        if str(record.get("status", "")) == "closed" and current.get(STATE) not in (
+            TERMINAL_EPOCH_STATES | {"verified", "superseded", "rejected"}
+        ):
+            raise StateError(f"deterministic record {bead_id} is closed before terminal convergence")
+        return record
 
     def close(self, bead_id: str, reason: str) -> None:
-        self.run(["bd", "close", bead_id, "--reason", reason, "--json"])
+        self.converge_status(bead_id, "closed", reason=reason)
 
     def emit_transition(self, bead_id: str, kind: str, state: str, seq: int) -> None:
         payload = canonical_json(
             {"schema_version": "1", "kind": kind, "state": state, "transition_seq": seq}
         )
-        self.run(
+        result = self.run(
             [
                 "event",
                 "emit",
@@ -805,11 +1158,112 @@ class BeadClient:
                 "--payload",
                 payload,
                 "--json",
+                "--require-ack",
             ]
         )
+        if not isinstance(result, Mapping) or result.get("submitted") is not True:
+            raise CommandError(
+                f"transition event {bead_id}/{seq} was not durably accepted"
+            )
+
+
+def _cas_transition(
+    client: BeadClient,
+    bead_id: str,
+    target: str,
+    *,
+    now: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    for _ in range(16):
+        record = client.authoritative_reread(bead_id)
+        metadata = record_metadata(record)
+        updated = transition_metadata(metadata, target, now=now, evidence=evidence)
+        if updated == metadata:
+            return record
+        swapped = client.cas_envelope(record, updated)
+        if swapped is not None:
+            return swapped
+    raise StateError(f"record {bead_id} did not converge after concurrent mutations")
+
+
+def _source_reservation(client: BeadClient, source_id: str) -> tuple[dict[str, Any], str]:
+    records = client.show([source_id])
+    if not records:
+        raise StateError(f"source bead {source_id} not found")
+    record = records[0]
+    value = raw_metadata(record).get(CANDIDATE_ID, "")
+    if not isinstance(value, str):
+        raise StateError(f"source bead {source_id} has invalid candidate reservation")
+    return record, value
+
+
+def _release_owned_reservations(
+    client: BeadClient, candidate_id: str, source_ids: Iterable[str]
+) -> None:
+    for source_id in sorted(set(source_ids)):
+        for _ in range(16):
+            _, owner = _source_reservation(client, source_id)
+            if owner == "" or owner != candidate_id:
+                break
+            if client.metadata_cas(source_id, CANDIDATE_ID, candidate_id, ""):
+                break
+        else:
+            raise StateError(
+                f"source bead {source_id} reservation did not converge while releasing {candidate_id}"
+            )
+
+
+def _reserve_candidate_sources(
+    client: BeadClient, candidate_id: str, *, now: str
+) -> dict[str, Any]:
+    candidate = client.authoritative_reread(candidate_id)
+    metadata = record_metadata(candidate)
+    state = metadata.get(STATE)
+    if state not in ACTIVE_CANDIDATE_STATES:
+        return candidate
+    acquired: list[str] = []
+    source_ids = require_nonempty_ids(
+        "source_beads", metadata.get(PREFIX + "source_beads", [])
+    )
+    for source_id in source_ids:
+        source, owner = _source_reservation(client, source_id)
+        if str(source.get("status", "")) == "closed":
+            if metadata.get(STATE) == "queued":
+                try:
+                    _cas_transition(client, candidate_id, "rejected", now=now)
+                finally:
+                    _release_owned_reservations(client, candidate_id, source_ids)
+            else:
+                _release_owned_reservations(client, candidate_id, acquired)
+            raise StateError(
+                f"source bead {source_id} is already closed without matching promotion evidence"
+            )
+        if owner == candidate_id:
+            continue
+        if owner == "" and client.metadata_cas(
+            source_id, CANDIDATE_ID, "", candidate_id
+        ):
+            acquired.append(source_id)
+            continue
+        _, owner = _source_reservation(client, source_id)
+        if owner == candidate_id:
+            continue
+        if metadata.get(STATE) == "queued":
+            try:
+                _cas_transition(client, candidate_id, "rejected", now=now)
+            finally:
+                _release_owned_reservations(client, candidate_id, source_ids)
+        else:
+            _release_owned_reservations(client, candidate_id, acquired)
+        raise StateError(
+            f"source bead {source_id} is reserved by candidate {owner!r}; refusing conflicting ownership"
+        )
+    return client.authoritative_reread(candidate_id)
 
 
 def enqueue_candidate(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
+    now = args.now or utc_now()
     metadata = new_candidate_metadata(
         source_beads=args.source_bead,
         delivery_unit=args.delivery_unit,
@@ -817,75 +1271,207 @@ def enqueue_candidate(client: BeadClient, args: argparse.Namespace) -> dict[str,
         base_sha=args.base_sha,
         summary_path=args.summary_path,
         review_path=args.review_path,
-        now=args.now or utc_now(),
+        now=now,
     )
-    records = client.list_thunderdome()
-    existing = [
+    bead_id = candidate_record_id(metadata)
+    legacy_matches = [
         record
-        for record in records
-        if (record.get("metadata") or {}).get(KIND) == "candidate"
-        and (record.get("metadata") or {}).get(PREFIX + "candidate_key")
+        for record in client.list_thunderdome()
+        if record_metadata(record).get(KIND) == "candidate"
+        and record_metadata(record).get(PREFIX + "candidate_key")
         == metadata[PREFIX + "candidate_key"]
     ]
-    if existing:
-        return existing[0]
-    active_sources = set(metadata[PREFIX + "source_beads"])
-    for record in records:
-        current = record.get("metadata") or {}
-        if current.get(KIND) != "candidate" or current.get(STATE) not in ACTIVE_CANDIDATE_STATES:
-            continue
-        if active_sources.intersection(current.get(PREFIX + "source_beads", [])):
-            raise StateError(
-                f"source bead already has active candidate {record.get('id')}; supersede it explicitly"
+    if len(legacy_matches) > 1:
+        raise StateError("candidate key has multiple conflicting legacy records")
+    if legacy_matches and str(legacy_matches[0].get("id", "")) != bead_id:
+        candidate = client.authoritative_reread(str(legacy_matches[0]["id"]))
+        state = record_metadata(candidate).get(STATE)
+        if state in ACTIVE_CANDIDATE_STATES:
+            candidate = _reserve_candidate_sources(
+                client, str(candidate["id"]), now=now
             )
+        elif state in {"rejected", "superseded"}:
+            _release_owned_reservations(
+                client,
+                str(candidate["id"]),
+                record_metadata(candidate).get(PREFIX + "source_beads", []),
+            )
+            client.converge_status(
+                str(candidate["id"]),
+                "closed",
+                reason=f"Thunderdome candidate converged in terminal state {state}",
+            )
+        return candidate
     short = metadata[PREFIX + "commit"][:12]
-    return client.create_record(
+    candidate = client.create_or_validate(
+        bead_id,
         f"Land candidate {metadata[PREFIX + 'delivery_unit']} {short}",
         "thunderdome-candidate",
         metadata,
     )
+    state = record_metadata(candidate).get(STATE)
+    if state in ACTIVE_CANDIDATE_STATES:
+        candidate = _reserve_candidate_sources(client, bead_id, now=now)
+    elif state in {"rejected", "superseded"}:
+        _release_owned_reservations(
+            client,
+            bead_id,
+            record_metadata(candidate).get(PREFIX + "source_beads", []),
+        )
+        client.converge_status(
+            bead_id,
+            "closed",
+            reason=f"Thunderdome candidate converged in terminal state {state}",
+        )
+    return candidate
+
+
+def _control_for(
+    client: BeadClient, bead_ids: Iterable[str]
+) -> dict[str, Any]:
+    control_id = control_record_id(bead_ids)
+    return client.create_or_validate(
+        control_id,
+        "Continuous Thunderdome epoch control",
+        "thunderdome-control",
+        {
+            PREFIX + "schema": SCHEMA,
+            KIND: "control",
+            ACTIVE_EPOCH: "",
+        },
+    )
+
+
+def _active_epoch_payload(control: Mapping[str, Any]) -> str:
+    value = raw_metadata(control).get(ACTIVE_EPOCH, "")
+    if not isinstance(value, str):
+        raise StateError("Thunderdome control has invalid active epoch intent")
+    return value
+
+
+def _other_active_epochs(client: BeadClient, epoch_id: str) -> list[str]:
+    active: list[str] = []
+    for record in client.list_thunderdome():
+        metadata = record_metadata(record)
+        if (
+            metadata.get(KIND) == "epoch"
+            and metadata.get(STATE) in EPOCH_STATES - TERMINAL_EPOCH_STATES
+            and str(record.get("id", "")) != epoch_id
+        ):
+            active.append(str(record.get("id", "")))
+    return sorted(require_nonempty_ids("active_epoch_ids", active)) if active else []
 
 
 def open_epoch(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
+    now = args.now or utc_now()
     candidate_ids = require_nonempty_ids("candidate_ids", args.candidate)
-    shown = {record["id"]: record for record in client.show(candidate_ids)}
-    missing = sorted(set(candidate_ids) - set(shown))
-    if missing:
-        raise StateError(f"missing candidate beads: {', '.join(missing)}")
-    validate_epoch_candidates(list(shown.values()), base_sha=args.base_sha)
     metadata = new_epoch_metadata(
         candidate_ids=candidate_ids,
         base_sha=args.base_sha,
         target_ref=args.target_ref,
-        now=args.now or utc_now(),
+        now=now,
     )
-    existing = [
-        record
+    epoch_id = epoch_record_id(metadata)
+    desired_identity = client._immutable_identity(metadata)
+    exact: list[dict[str, Any]] = []
+    try:
+        exact = client.show([epoch_id])
+    except CommandError:
+        exact = []
+    if exact and client._immutable_identity(record_metadata(exact[0])) != desired_identity:
+        raise StateError(f"deterministic epoch {epoch_id} has conflicting immutable payload")
+    matches = {
+        str(record["id"]): record
         for record in client.list_thunderdome()
-        if (record.get("metadata") or {}).get(KIND) == "epoch"
-        and (record.get("metadata") or {}).get(PREFIX + "membership_hash")
-        == metadata[PREFIX + "membership_hash"]
-        and (record.get("metadata") or {}).get(PREFIX + "base_sha") == metadata[PREFIX + "base_sha"]
-        and (record.get("metadata") or {}).get(PREFIX + "target_ref") == metadata[PREFIX + "target_ref"]
-        and (record.get("metadata") or {}).get(STATE) == "assembling"
-    ]
-    epoch = existing[0] if existing else client.create_record(
+        if record_metadata(record).get(KIND) == "epoch"
+        and client._immutable_identity(record_metadata(record)) == desired_identity
+    }
+    for record in exact:
+        matches[str(record["id"])] = record
+    if len(matches) > 1:
+        raise StateError(
+            "epoch membership has multiple durable records: "
+            + ", ".join(sorted(matches))
+        )
+    if matches:
+        epoch_id = next(iter(matches))
+        existing_epoch = client.authoritative_reread(epoch_id)
+        if record_metadata(existing_epoch).get(STATE) != "assembling":
+            return converge_epoch(client, existing_epoch, now=now)
+        metadata = record_metadata(existing_epoch)
+
+    shown = {str(record["id"]): record for record in client.show(candidate_ids)}
+    missing = sorted(set(candidate_ids) - set(shown))
+    if missing:
+        raise StateError(f"missing candidate beads: {', '.join(missing)}")
+    for candidate_id in candidate_ids:
+        shown[candidate_id] = _reserve_candidate_sources(
+            client, candidate_id, now=now
+        )
+    validate_epoch_candidates(list(shown.values()), base_sha=args.base_sha)
+    for candidate_id, candidate in shown.items():
+        candidate_metadata = record_metadata(candidate)
+        if (
+            candidate_metadata.get(STATE) == "frozen"
+            and candidate_metadata.get(PREFIX + "epoch_id") != epoch_id
+        ):
+            raise StateError(f"candidate {candidate_id} is frozen into another epoch")
+
+    control = _control_for(client, candidate_ids)
+    manifest = canonical_json(epoch_intent(epoch_id, metadata))
+    for _ in range(2):
+        active = _active_epoch_payload(control)
+        if active == manifest:
+            break
+        if active == "":
+            conflicting_epochs = _other_active_epochs(client, epoch_id)
+            if conflicting_epochs:
+                raise StateError(
+                    "active epoch records already exist outside the control ledger: "
+                    + ", ".join(conflicting_epochs)
+                )
+            if client.metadata_cas(str(control["id"]), ACTIVE_EPOCH, "", manifest):
+                break
+        control = client.show([str(control["id"])])[0]
+        active = _active_epoch_payload(control)
+        if active == manifest:
+            break
+        active_intent = parse_epoch_intent(active)
+        if active_intent["epoch_id"] == epoch_id:
+            active_metadata = new_epoch_metadata(
+                candidate_ids=active_intent["candidate_ids"],
+                base_sha=str(active_intent["base_sha"]),
+                target_ref=str(active_intent["target_ref"]),
+                now=str(active_intent["created_at"]),
+            )
+            if (
+                client._immutable_identity(active_metadata)
+                != client._immutable_identity(metadata)
+            ):
+                raise StateError(
+                    f"active intent for deterministic epoch {epoch_id} has conflicting payload"
+                )
+            metadata = active_metadata
+            manifest = active
+            break
+        active_records = client.show([str(active_intent["epoch_id"])])
+        if active_records and record_metadata(active_records[0]).get(STATE) in TERMINAL_EPOCH_STATES:
+            converge_epoch(client, active_records[0], now=now)
+            control = client.show([str(control["id"])])[0]
+            continue
+        raise StateError(
+            f"active epoch {active_intent['epoch_id']} already owns the Thunderdome control"
+        )
+    else:
+        raise StateError("could not elect the active Thunderdome epoch")
+
+    epoch = client.create_or_validate(
+        epoch_id,
         f"Thunderdome epoch {metadata[PREFIX + 'membership_hash'][:12]}",
         "thunderdome-epoch",
         metadata,
     )
-    epoch_id = str(epoch["id"])
-    for candidate_id in candidate_ids:
-        candidate_metadata = shown[candidate_id].get("metadata") or {}
-        if candidate_metadata.get(STATE) == "frozen":
-            if candidate_metadata.get(PREFIX + "epoch_id") != epoch_id:
-                raise StateError(f"candidate {candidate_id} is frozen into another epoch")
-            continue
-        frozen = transition_metadata(
-            candidate_metadata, "frozen", now=args.now or utc_now(), evidence={"epoch_id": epoch_id}
-        )
-        client.update_metadata(candidate_id, frozen)
-    return epoch
+    return converge_epoch(client, epoch, now=now)
 
 
 def _transition_evidence(args: argparse.Namespace) -> dict[str, Any]:
@@ -910,46 +1496,434 @@ def _transition_evidence(args: argparse.Namespace) -> dict[str, Any]:
     return evidence
 
 
+def _ensure_epoch_source_reservations(
+    client: BeadClient,
+    candidate_id: str,
+    metadata: Mapping[str, Any],
+    epoch_id: str,
+) -> None:
+    for source_id in require_nonempty_ids(
+        "source_beads", metadata.get(PREFIX + "source_beads", [])
+    ):
+        source, owner = _source_reservation(client, source_id)
+        if str(source.get("status", "")) == "closed":
+            if raw_metadata(source).get(PROMOTED_BY, "") == epoch_id:
+                continue
+            raise StateError(
+                f"source bead {source_id} closed before epoch candidate convergence without matching promotion provenance"
+            )
+        if owner == candidate_id:
+            continue
+        if owner == "" and client.metadata_cas(
+            source_id, CANDIDATE_ID, "", candidate_id
+        ):
+            continue
+        _, owner = _source_reservation(client, source_id)
+        if owner != candidate_id:
+            raise StateError(
+                f"source bead {source_id} has conflicting reservation owner {owner!r}"
+            )
+
+
+def _converge_candidate_follower(
+    client: BeadClient,
+    candidate_id: str,
+    epoch_id: str,
+    epoch_state: str,
+    *,
+    now: str,
+) -> dict[str, Any]:
+    record = client.authoritative_reread(candidate_id)
+    metadata = record_metadata(record)
+    if metadata.get(KIND) != "candidate":
+        raise StateError(f"epoch member {candidate_id} is not a candidate")
+    if (
+        str(record.get("status", "")) == "closed"
+        and metadata.get(STATE) in ACTIVE_CANDIDATE_STATES
+        and epoch_state not in TERMINAL_EPOCH_STATES
+    ):
+        raise StateError(f"candidate {candidate_id} is closed before terminal convergence")
+    if epoch_state in ABANDONED_EPOCH_STATES:
+        state = metadata.get(STATE)
+        if state in {"frozen", "landed"} and metadata.get(PREFIX + "epoch_id") != epoch_id:
+            raise StateError(f"candidate {candidate_id} belongs to another epoch")
+        if state in {"queued", "frozen", "landed"}:
+            return _cas_transition(client, candidate_id, "rejected", now=now)
+        if state in {"verified", "rejected", "superseded"}:
+            return record
+        raise StateError(
+            f"candidate {candidate_id} has unsupported terminal follower state {state!r}"
+        )
+
+    desired = {
+        "assembling": "frozen",
+        "landed": "landed",
+        "verifying": "landed",
+        "red": "landed",
+        "repairing": "landed",
+        "verified": "verified",
+        "promoting": "verified",
+        "promotion_committing": "verified",
+        "promotion_failed": "verified",
+        "promoted": "verified",
+    }.get(epoch_state)
+    if not desired:
+        return record
+    if epoch_state != "promoted":
+        _ensure_epoch_source_reservations(client, candidate_id, metadata, epoch_id)
+    for target in ("frozen", "landed", "verified"):
+        record = client.authoritative_reread(candidate_id)
+        metadata = record_metadata(record)
+        state = str(metadata.get(STATE, ""))
+        if state == target:
+            if target == "frozen" and metadata.get(PREFIX + "epoch_id") != epoch_id:
+                raise StateError(f"candidate {candidate_id} is frozen into another epoch")
+        elif target == "frozen" and state == "queued":
+            record = _cas_transition(
+                client,
+                candidate_id,
+                "frozen",
+                now=now,
+                evidence={"epoch_id": epoch_id},
+            )
+        elif target == "landed" and state == "frozen":
+            if metadata.get(PREFIX + "epoch_id") != epoch_id:
+                raise StateError(f"candidate {candidate_id} is frozen into another epoch")
+            record = _cas_transition(client, candidate_id, "landed", now=now)
+        elif target == "verified" and state == "landed":
+            record = _cas_transition(client, candidate_id, "verified", now=now)
+        elif state in {"rejected", "superseded"}:
+            raise StateError(
+                f"candidate {candidate_id} is {state} while epoch {epoch_id} owns it"
+            )
+        if target == desired:
+            return record
+    return record
+
+
+def _release_active_epoch(
+    client: BeadClient, epoch_id: str, candidate_ids: Iterable[str]
+) -> None:
+    control_id = control_record_id(candidate_ids)
+    try:
+        controls = client.show([control_id])
+    except CommandError:
+        return
+    if not controls:
+        return
+    active = _active_epoch_payload(controls[0])
+    if active == "":
+        return
+    intent = parse_epoch_intent(active)
+    if intent["epoch_id"] != epoch_id:
+        return
+    if not client.metadata_cas(control_id, ACTIVE_EPOCH, active, ""):
+        current = client.show([control_id])[0]
+        current_active = _active_epoch_payload(current)
+        if current_active:
+            current_intent = parse_epoch_intent(current_active)
+            if current_intent["epoch_id"] == epoch_id:
+                raise StateError(f"active epoch control for {epoch_id} did not converge")
+
+
+def _converge_promoted_source(
+    client: BeadClient,
+    source_id: str,
+    candidate_id: str,
+    epoch_id: str,
+    release_sha: str,
+) -> None:
+    source, reservation = _source_reservation(client, source_id)
+    provenance = raw_metadata(source).get(PROMOTED_BY, "")
+    if not isinstance(provenance, str):
+        raise StateError(f"source bead {source_id} has invalid promotion provenance")
+    expected_close_reason = f"Verified in Thunderdome epoch {epoch_id} at {release_sha}"
+    if str(source.get("status", "")) == "closed":
+        if provenance != epoch_id or str(source.get("close_reason", "")) != expected_close_reason:
+            if provenance == epoch_id:
+                client.metadata_cas(source_id, PROMOTED_BY, epoch_id, "")
+            raise StateError(
+                f"closed source bead {source_id} lacks matching promotion provenance"
+            )
+    else:
+        provenance_installed = False
+        if provenance == "":
+            if not client.metadata_cas(source_id, PROMOTED_BY, "", epoch_id):
+                source, reservation = _source_reservation(client, source_id)
+                provenance = raw_metadata(source).get(PROMOTED_BY, "")
+            else:
+                source, reservation = _source_reservation(client, source_id)
+                provenance = epoch_id
+                provenance_installed = True
+        if provenance != epoch_id:
+            raise StateError(
+                f"source bead {source_id} was promoted by conflicting epoch {provenance!r}"
+            )
+        if reservation != candidate_id:
+            raise StateError(
+                f"source bead {source_id} is not reserved by promoted candidate {candidate_id}"
+            )
+        source = client.converge_status(
+            source_id,
+            "closed",
+            reason=expected_close_reason,
+        )
+        if str(source.get("close_reason", "")) != expected_close_reason:
+            if provenance_installed:
+                client.metadata_cas(source_id, PROMOTED_BY, epoch_id, "")
+            raise StateError(
+                f"source bead {source_id} was closed outside epoch {epoch_id}"
+            )
+    for _ in range(16):
+        _, reservation = _source_reservation(client, source_id)
+        if reservation == "":
+            break
+        if reservation != candidate_id:
+            raise StateError(
+                f"source bead {source_id} reservation changed during promotion convergence"
+            )
+        if client.metadata_cas(source_id, CANDIDATE_ID, candidate_id, ""):
+            break
+    else:
+        raise StateError(
+            f"source bead {source_id} reservation release did not converge"
+        )
+
+
+def _converge_promoted_candidates(
+    client: BeadClient,
+    candidates: Sequence[Mapping[str, Any]],
+    epoch_id: str,
+    release_sha: str,
+    *,
+    close_candidates: bool,
+) -> None:
+    for candidate in candidates:
+        candidate_id = str(candidate["id"])
+        candidate_metadata = record_metadata(candidate)
+        for source_id in candidate_metadata.get(PREFIX + "source_beads", []):
+            _converge_promoted_source(
+                client, source_id, candidate_id, epoch_id, release_sha
+            )
+        if close_candidates:
+            client.converge_status(
+                candidate_id,
+                "closed",
+                reason=f"Verified in promoted Thunderdome epoch {epoch_id}",
+            )
+
+
+def _sealed_promotion_evidence(
+    metadata: Mapping[str, Any], epoch_id: str
+) -> dict[str, Any]:
+    evidence = {
+        "epoch_id": epoch_id,
+        "release_sha": str(metadata.get(PREFIX + "release_sha", "")),
+        "release_ref": str(metadata.get(PREFIX + "release_ref", "")),
+    }
+    evidence_ref = str(metadata.get(PREFIX + "evidence_ref", ""))
+    if evidence_ref:
+        evidence["evidence_ref"] = evidence_ref
+    return evidence
+
+
+def converge_epoch(
+    client: BeadClient, epoch: Mapping[str, Any], *, now: str
+) -> dict[str, Any]:
+    epoch_id = str(epoch.get("id", ""))
+    current = client.authoritative_reread(epoch_id)
+    metadata = record_metadata(current)
+    if metadata.get(KIND) != "epoch":
+        raise StateError(f"bead {epoch_id} is not an epoch")
+    state = str(metadata.get(STATE, ""))
+    if (
+        str(current.get("status", "")) == "closed"
+        and state not in TERMINAL_EPOCH_STATES
+    ):
+        raise StateError(f"epoch {epoch_id} is closed before terminal convergence")
+    candidate_ids = require_nonempty_ids(
+        "candidate_ids", metadata.get(PREFIX + "candidate_ids", [])
+    )
+    candidates = [
+        _converge_candidate_follower(
+            client, candidate_id, epoch_id, state, now=now
+        )
+        for candidate_id in candidate_ids
+    ]
+    if state == "promotion_committing":
+        sealed = _sealed_promotion_evidence(metadata, epoch_id)
+        _converge_promoted_candidates(
+            client,
+            candidates,
+            epoch_id,
+            sealed["release_sha"],
+            close_candidates=False,
+        )
+        promoted = _cas_transition(
+            client,
+            epoch_id,
+            "promoted",
+            now=now,
+            evidence=sealed,
+        )
+        return converge_epoch(client, promoted, now=now)
+    if state == "promoted":
+        _converge_promoted_candidates(
+            client,
+            candidates,
+            epoch_id,
+            str(metadata.get(PREFIX + "release_sha", "")),
+            close_candidates=True,
+        )
+    if state in ABANDONED_EPOCH_STATES:
+        for candidate in candidates:
+            candidate_id = str(candidate["id"])
+            candidate_metadata = record_metadata(candidate)
+            _release_owned_reservations(
+                client,
+                candidate_id,
+                candidate_metadata.get(PREFIX + "source_beads", []),
+            )
+            client.converge_status(
+                candidate_id,
+                "closed",
+                reason=f"Thunderdome epoch {epoch_id} ended in {state}",
+            )
+    if state in TERMINAL_EPOCH_STATES:
+        client.converge_status(
+            epoch_id,
+            "closed",
+            reason=f"Thunderdome epoch converged in terminal state {state}",
+        )
+        _release_active_epoch(client, epoch_id, candidate_ids)
+    return client.authoritative_reread(epoch_id)
+
+
+def _mark_and_emit_transition(
+    client: BeadClient, epoch: Mapping[str, Any]
+) -> dict[str, Any]:
+    epoch_id = str(epoch["id"])
+    marked_count = 0
+    cas_conflicts = 0
+    while marked_count <= MAX_HISTORY:
+        record = client.authoritative_reread(epoch_id)
+        metadata = record_metadata(record)
+        history = metadata.get(HISTORY, [])
+        if not history:
+            return record
+        emitted = int(metadata.get(EMITTED_SEQ, -1))
+        pending = [
+            entry
+            for entry in history
+            if int(entry.get("seq", -1)) > emitted
+        ]
+        if not pending:
+            return record
+        if marked_count == MAX_HISTORY:
+            raise StateError(f"event marker for epoch {epoch_id} exceeded bounded history")
+        entry = pending[0]
+        seq = int(entry.get("seq", -1))
+        client.emit_transition(
+            epoch_id,
+            "epoch",
+            str(entry.get("to", "")),
+            seq,
+        )
+        marked = dict(metadata)
+        marked[EMITTED_SEQ] = seq
+        if client.cas_envelope(record, marked) is not None:
+            marked_count += 1
+            cas_conflicts = 0
+            continue
+        cas_conflicts += 1
+        if cas_conflicts >= 16:
+            raise StateError(
+                f"event marker for epoch {epoch_id} did not converge after concurrent mutations"
+            )
+    raise StateError(f"event marker for epoch {epoch_id} did not converge")
+
+
 def transition_epoch(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
-    records = client.show([args.epoch_id])
-    if not records:
-        raise StateError(f"epoch {args.epoch_id} not found")
-    record = records[0]
-    metadata = record.get("metadata") or {}
+    now = args.now or utc_now()
+    record = client.authoritative_reread(args.epoch_id)
+    metadata = record_metadata(record)
     if metadata.get(KIND) != "epoch":
         raise StateError(f"bead {args.epoch_id} is not an epoch")
-    updated_metadata = transition_metadata(
-        metadata,
-        args.state,
-        now=args.now or utc_now(),
-        evidence=_transition_evidence(args),
-    )
-    updated = client.update_metadata(args.epoch_id, updated_metadata)
-    candidate_ids = updated_metadata.get(PREFIX + "candidate_ids", [])
-    candidate_target = "landed" if args.state == "landed" else "verified" if args.state == "verified" else ""
-    if candidate_target:
-        for candidate in client.show(candidate_ids):
-            candidate_metadata = candidate.get("metadata") or {}
-            if candidate_metadata.get(STATE) == candidate_target:
-                continue
-            candidate_updated = transition_metadata(
-                candidate_metadata, candidate_target, now=args.now or utc_now(), evidence={}
+    record = converge_epoch(client, record, now=now)
+    metadata = record_metadata(record)
+    evidence = _transition_evidence(args)
+    if args.state == "promoted" and metadata.get(STATE) != "promoted":
+        unsupported = set(evidence) - {
+            "epoch_id",
+            "release_sha",
+            "release_ref",
+            "evidence_ref",
+        }
+        if unsupported:
+            raise StateError(
+                "promoted transition has unsupported evidence fields: "
+                + ", ".join(sorted(unsupported))
             )
-            client.update_metadata(str(candidate["id"]), candidate_updated)
-    if args.state == "promoted":
-        for candidate in client.show(candidate_ids):
-            for source_id in (candidate.get("metadata") or {}).get(PREFIX + "source_beads", []):
-                client.close(
-                    source_id,
-                    f"Verified in Thunderdome epoch {args.epoch_id} at {updated_metadata[PREFIX + 'release_sha']}",
-                )
-    client.emit_transition(
+        if metadata.get(STATE) == "promoting":
+            committing_preview = transition_metadata(
+                metadata,
+                "promotion_committing",
+                now=now,
+                evidence=evidence,
+            )
+            transition_metadata(
+                committing_preview,
+                "promoted",
+                now=now,
+                evidence=evidence,
+            )
+            record = _cas_transition(
+                client,
+                args.epoch_id,
+                "promotion_committing",
+                now=now,
+                evidence=evidence,
+            )
+            metadata = record_metadata(record)
+        if metadata.get(STATE) != "promotion_committing":
+            raise StateError(
+                f"epoch {args.epoch_id} cannot commit promotion from {metadata.get(STATE)!r}"
+            )
+        sealed = _sealed_promotion_evidence(metadata, args.epoch_id)
+        requested = {
+            key: value
+            for key, value in evidence.items()
+            if key in {"epoch_id", "release_sha", "release_ref", "evidence_ref"}
+        }
+        if requested != sealed:
+            raise StateError(
+                f"epoch {args.epoch_id} promotion evidence conflicts with its sealed commit"
+            )
+        candidate_ids = require_nonempty_ids(
+            "candidate_ids", metadata.get(PREFIX + "candidate_ids", [])
+        )
+        candidates = [
+            _converge_candidate_follower(
+                client, candidate_id, args.epoch_id, "promotion_committing", now=now
+            )
+            for candidate_id in candidate_ids
+        ]
+        _converge_promoted_candidates(
+            client,
+            candidates,
+            args.epoch_id,
+            sealed["release_sha"],
+            close_candidates=False,
+        )
+    updated = _cas_transition(
+        client,
         args.epoch_id,
-        "epoch",
         args.state,
-        len(updated_metadata.get(HISTORY, [])) - 1,
+        now=now,
+        evidence=evidence,
     )
-    return updated
+    updated = converge_epoch(client, updated, now=now)
+    return _mark_and_emit_transition(client, updated)
 
 
 def read_projection(client: BeadClient, now: str, trunk_sha: str = "") -> dict[str, Any]:
@@ -958,12 +1932,13 @@ def read_projection(client: BeadClient, now: str, trunk_sha: str = "") -> dict[s
         {
             source_id
             for record in records
-            if (record.get("metadata") or {}).get(KIND) == "candidate"
-            for source_id in (record.get("metadata") or {}).get(PREFIX + "source_beads", [])
+            if record_metadata(record).get(KIND) == "candidate"
+            for source_id in record_metadata(record).get(PREFIX + "source_beads", [])
         }
     )
     source_states = {
-        str(record["id"]): str(record.get("status", "")) for record in client.show(source_ids)
+        str(record["id"]): str(record.get("status", ""))
+        for record in client.show(source_ids)
     }
     exact_trunk = require_sha("trunk_sha", trunk_sha) if trunk_sha else ""
     return project_state(
@@ -974,60 +1949,521 @@ def read_projection(client: BeadClient, now: str, trunk_sha: str = "") -> dict[s
     )
 
 
-
-def _dispatch_epoch(client: BeadClient, args: argparse.Namespace, epoch: Mapping[str, Any]) -> dict[str, Any]:
-    if not args.rig:
-        raise StateError("--rig is required to dispatch an epoch")
-    if not args.full_gate_command:
-        raise StateError("--full-gate-command is required to dispatch an epoch")
-    metadata = epoch.get("metadata") or {}
+def _dispatch_formula_digest(
+    client: BeadClient, args: argparse.Namespace, metadata: Mapping[str, Any]
+) -> str:
     candidate_ids = require_nonempty_ids(
         "candidate_ids", metadata.get(PREFIX + "candidate_ids", [])
     )
-    operator = args.operator if "/" in args.operator else f"{args.rig}/{args.operator}"
-    response = client.run(
+    result = client.run(
         [
-            "sling",
-            operator,
-            str(epoch["id"]),
-            "--on",
+            "formula",
+            "show",
             "thunderdome-land",
             "--var",
             f"candidate_ids={','.join(candidate_ids)}",
             "--var",
             f"base_sha={metadata.get(PREFIX + 'base_sha', '')}",
             "--var",
-            f"target_ref={args.target_ref}",
+            f"target_ref={metadata.get(PREFIX + 'target_ref', '')}",
             "--var",
             f"full_gate_command={args.full_gate_command}",
             "--json",
         ]
     )
-    workflow_id = str(response.get("workflow_id") or response.get("bead_id") or "")
-    if not workflow_id:
-        raise CommandError("gc sling returned no workflow identifier")
-    updated_metadata = dict(metadata)
-    updated_metadata[PREFIX + "workflow_id"] = workflow_id
-    client.update_metadata(str(epoch["id"]), updated_metadata)
+    if not isinstance(result, Mapping):
+        raise CommandError("gc formula show returned an invalid response")
+    fingerprint = str(result.get("compiled_fingerprint", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise CommandError("gc formula show returned no compiled fingerprint")
+    return fingerprint
+
+
+def _dispatch_intent(
+    client: BeadClient, args: argparse.Namespace, metadata: Mapping[str, Any]
+) -> dict[str, Any]:
+    operator = args.operator if "/" in args.operator else f"{args.rig}/{args.operator}"
+    return {
+        "schema_version": "1",
+        "formula": "thunderdome-land",
+        "formula_digest": _dispatch_formula_digest(client, args, metadata),
+        "operator": operator,
+        "rig": str(args.rig),
+        "full_gate_command": str(args.full_gate_command),
+        "candidate_ids": require_nonempty_ids(
+            "candidate_ids", metadata.get(PREFIX + "candidate_ids", [])
+        ),
+        "base_sha": require_sha(
+            "base_sha", str(metadata.get(PREFIX + "base_sha", ""))
+        ),
+        "target_ref": require_ref(
+            "target_ref", str(metadata.get(PREFIX + "target_ref", ""))
+        ),
+    }
+
+
+def _seal_dispatch_intent(
+    client: BeadClient, epoch_id: str, args: argparse.Namespace
+) -> dict[str, Any]:
+    for _ in range(16):
+        epoch = client.authoritative_reread(epoch_id)
+        metadata = record_metadata(epoch)
+        intent = _dispatch_intent(client, args, metadata)
+        existing = metadata.get(DISPATCH_INTENT)
+        if existing is not None:
+            if not isinstance(existing, Mapping) or canonical_json(existing) != canonical_json(intent):
+                raise StateError(
+                    f"epoch {epoch_id} dispatch identity differs from its sealed intent"
+                )
+            return epoch
+        updated = dict(metadata)
+        updated[DISPATCH_INTENT] = intent
+        swapped = client.cas_envelope(epoch, updated)
+        if swapped is not None:
+            return swapped
+    raise StateError(f"dispatch intent for epoch {epoch_id} did not converge")
+
+
+def _dispatch_epoch(client: BeadClient, args: argparse.Namespace, epoch: Mapping[str, Any]) -> dict[str, Any]:
+    if not args.rig:
+        raise StateError("--rig is required to dispatch an epoch")
+    if not args.full_gate_command:
+        raise StateError("--full-gate-command is required to dispatch an epoch")
+    epoch_id = str(epoch["id"])
+    epoch = _seal_dispatch_intent(client, epoch_id, args)
+    metadata = record_metadata(epoch)
+    candidate_ids = require_nonempty_ids(
+        "candidate_ids", metadata.get(PREFIX + "candidate_ids", [])
+    )
+    existing_workflow = str(metadata.get(PREFIX + "workflow_id", ""))
+    if existing_workflow:
+        workflow_id = existing_workflow
+    else:
+        operator = args.operator if "/" in args.operator else f"{args.rig}/{args.operator}"
+        response = client.run(
+            [
+                "sling",
+                operator,
+                epoch_id,
+                "--on",
+                "thunderdome-land",
+                "--var",
+                f"candidate_ids={','.join(candidate_ids)}",
+                "--var",
+                f"base_sha={metadata.get(PREFIX + 'base_sha', '')}",
+                "--var",
+                f"target_ref={metadata.get(PREFIX + 'target_ref', '')}",
+                "--var",
+                f"full_gate_command={args.full_gate_command}",
+                "--json",
+            ],
+            extra_env={
+                "GC_EXPECTED_FORMULA_FINGERPRINT": str(
+                    metadata[DISPATCH_INTENT]["formula_digest"]
+                )
+            },
+        )
+        if not isinstance(response, Mapping):
+            raise CommandError("gc sling returned an invalid response")
+        root = response.get("root")
+        root_id = root.get("id") if isinstance(root, Mapping) else ""
+        workflow_id = str(
+            response.get("workflow_id")
+            or response.get("root_id")
+            or response.get("bead_id")
+            or root_id
+            or ""
+        )
+        if not workflow_id:
+            raise CommandError("gc sling returned no workflow identifier")
+        for _ in range(16):
+            epoch = client.authoritative_reread(epoch_id)
+            metadata = record_metadata(epoch)
+            current_workflow = str(metadata.get(PREFIX + "workflow_id", ""))
+            if current_workflow:
+                if current_workflow != workflow_id:
+                    raise StateError(
+                        f"epoch {epoch_id} has conflicting workflow {current_workflow}"
+                    )
+                workflow_id = current_workflow
+                break
+            updated = dict(metadata)
+            updated[PREFIX + "workflow_id"] = workflow_id
+            if client.cas_envelope(epoch, updated) is not None:
+                break
+        else:
+            raise StateError(f"workflow linkage for epoch {epoch_id} did not converge")
     return {
         "schema_version": "1",
         "ok": True,
         "action": "dispatched",
-        "epoch_id": str(epoch["id"]),
+        "epoch_id": epoch_id,
         "workflow_id": workflow_id,
         "candidate_ids": candidate_ids,
     }
 
 
-def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
+def _repair_reasons(
+    records: Sequence[Mapping[str, Any]],
+    source_records: Mapping[str, Mapping[str, Any]],
+    projection: Mapping[str, Any],
+) -> list[str]:
+    reasons = {
+        f"projection:{item['code']}:{item['entity']}"
+        for item in projection.get("violations", [])
+    }
+    by_id = {str(record.get("id", "")): record for record in records}
+    controls = {
+        str(record.get("id", "")): record
+        for record in records
+        if record_metadata(record).get(KIND) == "control"
+    }
+    for bead_id, record in by_id.items():
+        metadata = record_metadata(record)
+        kind = metadata.get(KIND)
+        if kind in {"candidate", "epoch"}:
+            if not authoritative_value(record):
+                reasons.add(f"legacy-envelope:{bead_id}")
+            raw = raw_metadata(record)
+            for key, value in discovery_mirrors(metadata).items():
+                if raw.get(key, "") != value:
+                    reasons.add(f"mirror:{bead_id}:{key}")
+        if kind == "candidate":
+            state = metadata.get(STATE)
+            if (
+                state in ACTIVE_CANDIDATE_STATES
+                and str(record.get("status", "")) == "closed"
+            ):
+                reasons.add(f"premature-close:{bead_id}")
+            if (
+                state in {"rejected", "superseded"}
+                and str(record.get("status", "")) != "closed"
+            ):
+                reasons.add(f"terminal-status:{bead_id}")
+            candidate_epoch = by_id.get(str(metadata.get(PREFIX + "epoch_id", "")))
+            promoted = (
+                candidate_epoch is not None
+                and record_metadata(candidate_epoch).get(STATE) == "promoted"
+            )
+            abandoned = (
+                candidate_epoch is not None
+                and record_metadata(candidate_epoch).get(STATE)
+                in ABANDONED_EPOCH_STATES
+            )
+            if abandoned and (
+                state not in {"verified", "rejected", "superseded"}
+                or str(record.get("status", "")) != "closed"
+            ):
+                reasons.add(f"terminal-follower:{bead_id}")
+            if promoted and str(record.get("status", "")) != "closed":
+                reasons.add(f"terminal-status:{bead_id}")
+            for source_id in metadata.get(PREFIX + "source_beads", []):
+                source = source_records.get(source_id)
+                if source is None:
+                    reasons.add(f"missing-source:{source_id}")
+                    continue
+                owner = raw_metadata(source).get(CANDIDATE_ID, "")
+                if state in ACTIVE_CANDIDATE_STATES and owner != bead_id:
+                    reasons.add(f"reservation:{source_id}:{bead_id}")
+                if state in {"rejected", "superseded"} and owner == bead_id:
+                    reasons.add(f"stale-reservation:{source_id}:{bead_id}")
+                if promoted:
+                    if (
+                        str(source.get("status", "")) != "closed"
+                        or raw_metadata(source).get(PROMOTED_BY, "") != str(
+                            metadata.get(PREFIX + "epoch_id", "")
+                        )
+                        or owner == bead_id
+                    ):
+                        reasons.add(f"promotion-source:{source_id}")
+        if kind == "epoch":
+            state = str(metadata.get(STATE, ""))
+            candidate_ids = metadata.get(PREFIX + "candidate_ids", [])
+            if (
+                state not in TERMINAL_EPOCH_STATES
+                and str(record.get("status", "")) == "closed"
+            ):
+                reasons.add(f"premature-close:{bead_id}")
+            if state in TERMINAL_EPOCH_STATES and str(record.get("status", "")) != "closed":
+                reasons.add(f"terminal-status:{bead_id}")
+            if state not in TERMINAL_EPOCH_STATES:
+                control_id = control_record_id(candidate_ids)
+                control = controls.get(control_id)
+                if control is None:
+                    reasons.add(f"missing-control:{control_id}")
+                else:
+                    active = _active_epoch_payload(control)
+                    if not active:
+                        reasons.add(f"missing-intent:{control_id}")
+                    else:
+                        try:
+                            intent = parse_epoch_intent(active)
+                        except StateError:
+                            reasons.add(f"invalid-intent:{control_id}")
+                        else:
+                            if intent["epoch_id"] != bead_id:
+                                reasons.add(f"intent-owner:{control_id}")
+    for control_id, control in controls.items():
+        active = _active_epoch_payload(control)
+        if not active:
+            continue
+        try:
+            intent = parse_epoch_intent(active)
+        except StateError:
+            reasons.add(f"invalid-intent:{control_id}")
+            continue
+        epoch = by_id.get(str(intent["epoch_id"]))
+        if epoch is None:
+            reasons.add(f"intent-epoch-missing:{intent['epoch_id']}")
+        elif record_metadata(epoch).get(STATE) in TERMINAL_EPOCH_STATES:
+            reasons.add(f"stale-intent:{intent['epoch_id']}")
+    return sorted(reasons)
+
+
+def repair_ledger(
+    client: BeadClient, records: Sequence[Mapping[str, Any]], *, now: str
+) -> list[dict[str, Any]]:
+    for record in records:
+        metadata = record_metadata(record)
+        if metadata.get(KIND) in {"candidate", "epoch"}:
+            client.authoritative_reread(str(record["id"]))
     records = client.list_thunderdome()
+    by_id = {str(record.get("id", "")): record for record in records}
+    for candidate_id, record in sorted(by_id.items()):
+        metadata = record_metadata(record)
+        state = metadata.get(STATE)
+        if metadata.get(KIND) != "candidate" or state not in {
+            "rejected",
+            "superseded",
+        }:
+            continue
+        _release_owned_reservations(
+            client, candidate_id, metadata.get(PREFIX + "source_beads", [])
+        )
+        client.converge_status(
+            candidate_id,
+            "closed",
+            reason=f"Thunderdome candidate converged in terminal state {state}",
+        )
+    records = client.list_thunderdome()
+    by_id = {str(record.get("id", "")): record for record in records}
+
+    for candidate_id, record in sorted(by_id.items()):
+        metadata = record_metadata(record)
+        if metadata.get(KIND) != "candidate":
+            continue
+        state = metadata.get(STATE)
+        if (
+            state in ACTIVE_CANDIDATE_STATES
+            and str(record.get("status", "")) == "closed"
+        ):
+            raise StateError(
+                f"candidate {candidate_id} is closed before terminal convergence"
+            )
+        sources = metadata.get(PREFIX + "source_beads", [])
+        if state in {"rejected", "superseded"}:
+            _release_owned_reservations(client, candidate_id, sources)
+            client.converge_status(
+                candidate_id,
+                "closed",
+                reason=f"Thunderdome candidate converged in terminal state {state}",
+            )
+            continue
+        if state == "queued":
+            try:
+                _reserve_candidate_sources(client, candidate_id, now=now)
+            except StateError:
+                if record_metadata(client.authoritative_reread(candidate_id)).get(STATE) != "rejected":
+                    raise
+        elif state in {"frozen", "landed", "verified"}:
+            epoch = by_id.get(str(metadata.get(PREFIX + "epoch_id", "")))
+            if (
+                state == "verified"
+                and epoch is not None
+                and record_metadata(epoch).get(STATE) == "promoted"
+            ):
+                continue
+            _ensure_epoch_source_reservations(
+                client,
+                candidate_id,
+                metadata,
+                str(metadata.get(PREFIX + "epoch_id", "")),
+            )
+
+    records = client.list_thunderdome()
+    epochs = {
+        str(record["id"]): record
+        for record in records
+        if record_metadata(record).get(KIND) == "epoch"
+    }
+    active_epochs = {
+        epoch_id: record
+        for epoch_id, record in epochs.items()
+        if record_metadata(record).get(STATE) not in TERMINAL_EPOCH_STATES
+    }
+    prematurely_closed_epochs = sorted(
+        epoch_id
+        for epoch_id, record in active_epochs.items()
+        if str(record.get("status", "")) == "closed"
+    )
+    if prematurely_closed_epochs:
+        raise StateError(
+            "active epochs are closed before terminal convergence: "
+            + ", ".join(prematurely_closed_epochs)
+        )
+    if len(active_epochs) > 1:
+        raise StateError(
+            "multiple active epochs have conflicting ownership evidence: "
+            + ", ".join(sorted(active_epochs))
+        )
+
+    control_records = [
+        record for record in records if record_metadata(record).get(KIND) == "control"
+    ]
+    for control in control_records:
+        active = _active_epoch_payload(control)
+        if not active:
+            continue
+        intent = parse_epoch_intent(active)
+        epoch_id = str(intent["epoch_id"])
+        epoch = epochs.get(epoch_id)
+        if epoch is None and active_epochs and epoch_id not in active_epochs:
+            raise StateError(
+                f"active intent for {epoch_id} conflicts with another active epoch"
+            )
+        if epoch is None:
+            metadata = new_epoch_metadata(
+                candidate_ids=intent["candidate_ids"],
+                base_sha=str(intent["base_sha"]),
+                target_ref=str(intent["target_ref"]),
+                now=str(intent["created_at"]),
+            )
+            epoch = client.create_or_validate(
+                epoch_id,
+                f"Thunderdome epoch {str(intent['membership_hash'])[:12]}",
+                "thunderdome-epoch",
+                metadata,
+            )
+            epochs[epoch_id] = epoch
+        elif (
+            client._immutable_identity(record_metadata(epoch))
+            != client._immutable_identity(
+                new_epoch_metadata(
+                    candidate_ids=intent["candidate_ids"],
+                    base_sha=str(intent["base_sha"]),
+                    target_ref=str(intent["target_ref"]),
+                    now=str(intent["created_at"]),
+                )
+            )
+        ):
+            raise StateError(f"active intent for epoch {epoch_id} conflicts with epoch payload")
+        if active_epochs and epoch_id not in active_epochs and record_metadata(epoch).get(STATE) not in TERMINAL_EPOCH_STATES:
+            raise StateError(f"active intent for {epoch_id} conflicts with another active epoch")
+        converge_epoch(client, epoch, now=now)
+
+    records = client.list_thunderdome()
+    active_epochs = {
+        str(record["id"]): record
+        for record in records
+        if record_metadata(record).get(KIND) == "epoch"
+        and record_metadata(record).get(STATE) not in TERMINAL_EPOCH_STATES
+    }
+    if len(active_epochs) == 1:
+        epoch_id, epoch = next(iter(active_epochs.items()))
+        metadata = record_metadata(epoch)
+        control = _control_for(client, metadata.get(PREFIX + "candidate_ids", []))
+        manifest = canonical_json(epoch_intent(epoch_id, metadata))
+        active = _active_epoch_payload(control)
+        if active == "":
+            if not client.metadata_cas(str(control["id"]), ACTIVE_EPOCH, "", manifest):
+                control = client.show([str(control["id"])])[0]
+                active = _active_epoch_payload(control)
+            else:
+                active = manifest
+        if active != manifest:
+            intent = parse_epoch_intent(active)
+            raise StateError(
+                f"active epoch {intent['epoch_id']} conflicts with recoverable epoch {epoch_id}"
+            )
+        converge_epoch(client, epoch, now=now)
+
+    records = client.list_thunderdome()
+    for record in records:
+        metadata = record_metadata(record)
+        if metadata.get(KIND) != "epoch":
+            continue
+        if metadata.get(STATE) in TERMINAL_EPOCH_STATES:
+            record = converge_epoch(client, record, now=now)
+        _mark_and_emit_transition(client, record)
+    return client.list_thunderdome()
+
+
+def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
     now = args.now or utc_now()
+    records = client.list_thunderdome()
     source_ids = sorted(
         {
             source_id
             for record in records
-            if (record.get("metadata") or {}).get(KIND) == "candidate"
-            for source_id in (record.get("metadata") or {}).get(PREFIX + "source_beads", [])
+            if record_metadata(record).get(KIND) == "candidate"
+            for source_id in record_metadata(record).get(PREFIX + "source_beads", [])
+        }
+    )
+    source_records = {
+        str(record["id"]): record for record in client.show(source_ids)
+    }
+    source_states = {
+        source_id: str(record.get("status", ""))
+        for source_id, record in source_records.items()
+    }
+    if args.dry_run:
+        projection = project_state(
+            records,
+            now=now,
+            source_states=source_states,
+            trunk_sha=args.trunk_sha,
+        )
+        repair_reasons = _repair_reasons(records, source_records, projection)
+        plan = plan_reconcile(
+            records,
+            now=now,
+            trunk_sha=args.trunk_sha,
+            max_depth=args.max_depth,
+            max_age_seconds=args.max_age_seconds,
+        )
+        if repair_reasons:
+            return {
+                **plan,
+                "ok": True,
+                "action": "would_repair",
+                "repair_reasons": repair_reasons,
+            }
+        if plan["active_epoch_ids"]:
+            active = {
+                str(record["id"]): record
+                for record in records
+                if str(record.get("id", "")) in plan["active_epoch_ids"]
+            }
+            if len(active) == 1:
+                metadata = record_metadata(next(iter(active.values())))
+                if metadata.get(STATE) == "assembling" and not metadata.get(
+                    PREFIX + "workflow_id"
+                ):
+                    return {**plan, "ok": True, "action": "would_resume"}
+            return {**plan, "ok": True, "action": "none"}
+        return {
+            **plan,
+            "ok": True,
+            "action": "would_dispatch" if plan["due"] else "none",
+        }
+
+    records = repair_ledger(client, records, now=now)
+    source_ids = sorted(
+        {
+            source_id
+            for record in records
+            if record_metadata(record).get(KIND) == "candidate"
+            for source_id in record_metadata(record).get(PREFIX + "source_beads", [])
         }
     )
     source_states = {
@@ -1059,17 +2495,14 @@ def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
         }
         if len(active) == 1:
             epoch = active[plan["active_epoch_ids"][0]]
-            metadata = epoch.get("metadata") or {}
-            if metadata.get(STATE) == "assembling" and not metadata.get(PREFIX + "workflow_id"):
-                if args.dry_run:
-                    return {**plan, "ok": True, "action": "would_resume"}
+            metadata = record_metadata(epoch)
+            if metadata.get(STATE) == "assembling" and not metadata.get(
+                PREFIX + "workflow_id"
+            ):
                 return _dispatch_epoch(client, args, epoch)
         return {**plan, "ok": True, "action": "none"}
     if not plan["due"]:
         return {**plan, "ok": True, "action": "none"}
-    if args.dry_run:
-        return {**plan, "ok": True, "action": "would_dispatch"}
-
     epoch_args = argparse.Namespace(
         candidate=plan["candidate_ids"],
         base_sha=args.trunk_sha,
@@ -1078,6 +2511,26 @@ def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
     )
     epoch = open_epoch(client, epoch_args)
     return _dispatch_epoch(client, args, epoch)
+
+
+def migrate_legacy_records(client: BeadClient) -> dict[str, Any]:
+    migrated: list[str] = []
+    for record in client.list_thunderdome():
+        metadata = record_metadata(record)
+        if metadata.get(KIND) not in {"candidate", "epoch"}:
+            continue
+        if authoritative_value(record):
+            continue
+        bead_id = str(record.get("id", ""))
+        client.authoritative_reread(bead_id)
+        migrated.append(bead_id)
+    return {
+        "schema_version": "1",
+        "ok": True,
+        "action": "migrated",
+        "migrated_ids": sorted(migrated),
+        "migrated_count": len(migrated),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1110,7 +2563,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     transition = epoch_sub.add_parser("transition", help="Apply one validated epoch transition")
     transition.add_argument("epoch_id")
-    transition.add_argument("state", choices=sorted(EPOCH_STATES))
+    transition.add_argument(
+        "state", choices=sorted(EPOCH_STATES - {"promotion_committing"})
+    )
     transition.add_argument("--landed-sha")
     transition.add_argument("--verified-sha")
     transition.add_argument("--release-sha")
@@ -1128,6 +2583,11 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true")
     status.add_argument("--trunk-sha", default="")
     status.add_argument("--fail-on-violation", action="store_true")
+
+    migrate = subparsers.add_parser(
+        "migrate", help="Migrate legacy records during an explicitly quiescent cutover"
+    )
+    migrate.add_argument("--json", action="store_true")
 
     reconcile_command = subparsers.add_parser(
         "reconcile", help="Dispatch one bounded epoch when queue depth or age is due"
@@ -1155,6 +2615,8 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = subprocess_runne
             result = open_epoch(client, args)
         elif args.command == "epoch" and args.epoch_command == "transition":
             result = transition_epoch(client, args)
+        elif args.command == "migrate":
+            result = migrate_legacy_records(client)
         elif args.command == "reconcile":
             result = reconcile(client, args)
         elif args.command == "status":

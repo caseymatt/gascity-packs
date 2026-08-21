@@ -7,8 +7,10 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 
 
@@ -29,6 +31,174 @@ def load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+class InjectedCrash(RuntimeError):
+    pass
+
+
+class DeterministicRunner:
+    def __init__(self, module) -> None:
+        self.module = module
+        self.records: dict[str, dict] = {}
+        self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
+        self.mutations = 0
+        self.crash_at: int | None = None
+        self.lose_next_sling = False
+        self.workflows: dict[str, str] = {}
+        self.sling_effects = 0
+        self.close_effects: dict[str, int] = {}
+        self.events: list[dict] = []
+        self.formula_fingerprint = "a" * 64
+        self.change_formula_after_show = False
+
+    def add(
+        self,
+        bead_id: str,
+        *,
+        status: str = "in_progress",
+        metadata: dict | None = None,
+        envelope: dict | None = None,
+    ) -> dict:
+        if metadata is not None and envelope is not None:
+            raise AssertionError("choose raw metadata or an authoritative envelope")
+        stored = (
+            self.module.stored_metadata(envelope)
+            if envelope is not None
+            else dict(metadata or {})
+        )
+        record = {"id": bead_id, "status": status, "metadata": stored}
+        self.records[bead_id] = record
+        return record
+
+    @staticmethod
+    def _copy(value):
+        return json.loads(json.dumps(value))
+
+    @staticmethod
+    def _value(args: list[str], flag: str) -> str:
+        return args[args.index(flag) + 1]
+
+    def _effect(self) -> None:
+        self.mutations += 1
+        if self.crash_at == self.mutations:
+            raise InjectedCrash(f"crash after mutation {self.mutations}")
+
+    def _completed(self, args, output, returncode: int = 0):
+        return subprocess.CompletedProcess(
+            args,
+            returncode,
+            stdout=json.dumps(output),
+            stderr="" if returncode == 0 else "deterministic fake failure",
+        )
+
+    def __call__(self, raw_args, env):
+        args = list(raw_args)
+        self.calls.append(args)
+        self.envs.append(dict(env))
+        command_index = next(
+            index
+            for index, value in enumerate(args)
+            if value in {"bd", "sling", "event", "formula"}
+        )
+        command = args[command_index:]
+        if command[:2] == ["bd", "show"]:
+            ids = command[2 : command.index("--json")]
+            missing = [bead_id for bead_id in ids if bead_id not in self.records]
+            if missing:
+                return self._completed(args, [], 1)
+            return self._completed(
+                args, [self._copy(self.records[bead_id]) for bead_id in ids]
+            )
+        if command[:2] == ["bd", "list"]:
+            rows = [
+                self._copy(record)
+                for record in self.records.values()
+                if self.module.KIND in record.get("metadata", {})
+            ]
+            return self._completed(args, rows)
+        if command[:2] == ["bd", "create"]:
+            bead_id = self._value(command, "--id")
+            if bead_id in self.records:
+                return self._completed(args, {}, 1)
+            record = {
+                "id": bead_id,
+                "status": self._value(command, "--status"),
+                "metadata": json.loads(self._value(command, "--metadata")),
+            }
+            self.records[bead_id] = record
+            self._effect()
+            return self._completed(args, self._copy(record))
+        if command[:2] == ["bd", "metadata-cas"]:
+            bead_id = command[2]
+            record = self.records.get(bead_id)
+            if record is None:
+                return self._completed(args, {}, 1)
+            key = self._value(command, "--key")
+            expected = self._value(command, "--expected")
+            value = self._value(command, "--value")
+            current = record.setdefault("metadata", {}).get(key, "")
+            current_wire = (
+                current
+                if isinstance(current, str)
+                else self.module.canonical_json(current)
+            )
+            swapped = current_wire == expected
+            if swapped:
+                record["metadata"][key] = (
+                    json.loads(value)
+                    if key in {*self.module.STRUCTURED_ID_METADATA_KEYS, self.module.HISTORY}
+                    else value
+                )
+                self._effect()
+            return self._completed(args, {"swapped": swapped})
+        if command[:2] == ["bd", "update"]:
+            bead_id = command[2]
+            record = self.records[bead_id]
+            if "--status" in command:
+                record["status"] = self._value(command, "--status")
+            if "--metadata" in command:
+                record["metadata"] = json.loads(self._value(command, "--metadata"))
+            self._effect()
+            return self._completed(args, self._copy(record))
+        if command[:2] == ["bd", "close"]:
+            bead_id = command[2]
+            record = self.records[bead_id]
+            if record["status"] != "closed":
+                record["status"] = "closed"
+                record["close_reason"] = self._value(command, "--reason")
+                self.close_effects[bead_id] = self.close_effects.get(bead_id, 0) + 1
+                self._effect()
+            return self._completed(args, self._copy(record))
+        if command[:2] == ["formula", "show"]:
+            fingerprint = self.formula_fingerprint
+            if self.change_formula_after_show:
+                self.formula_fingerprint = "b" * 64
+                self.change_formula_after_show = False
+            return self._completed(
+                args, {"ok": True, "compiled_fingerprint": fingerprint}
+            )
+        if command and command[0] == "sling":
+            if (
+                env.get("GC_EXPECTED_FORMULA_FINGERPRINT", "")
+                != self.formula_fingerprint
+            ):
+                return self._completed(args, {}, 1)
+            source_id = command[2]
+            workflow_id = self.workflows.get(source_id)
+            if not workflow_id:
+                workflow_id = f"wf-{source_id}"
+                self.workflows[source_id] = workflow_id
+                self.sling_effects += 1
+            if self.lose_next_sling:
+                self.lose_next_sling = False
+                return self._completed(args, {}, 75)
+            return self._completed(args, {"root_id": workflow_id})
+        if command[:2] == ["event", "emit"]:
+            payload = json.loads(self._value(command, "--payload"))
+            self.events.append(payload)
+            return self._completed(args, {"ok": True, "submitted": True})
+        raise AssertionError(f"unexpected fake command: {command}")
 
 
 class StateMachineTests(unittest.TestCase):
@@ -128,6 +298,12 @@ class StateMachineTests(unittest.TestCase):
         epoch = self.module.transition_metadata(epoch, "promoting", now=LATER)
         epoch = self.module.transition_metadata(
             epoch,
+            "promotion_committing",
+            now=LATER,
+            evidence={"release_sha": LANDED_SHA, "release_ref": "refs/heads/release/stable"},
+        )
+        epoch = self.module.transition_metadata(
+            epoch,
             "promoted",
             now=LATER,
             evidence={"release_sha": LANDED_SHA, "release_ref": "refs/heads/release/stable"},
@@ -135,7 +311,7 @@ class StateMachineTests(unittest.TestCase):
 
         self.assertEqual(epoch["gc.thunderdome.state"], "promoted")
         self.assertEqual(epoch["gc.thunderdome.release_sha"], LANDED_SHA)
-        self.assertEqual([entry["seq"] for entry in epoch["gc.thunderdome.history"]], list(range(6)))
+        self.assertEqual([entry["seq"] for entry in epoch["gc.thunderdome.history"]], list(range(7)))
 
     def test_red_epoch_repairs_forward_without_bisection(self) -> None:
         epoch = self.epoch()
@@ -264,6 +440,12 @@ class StateMachineTests(unittest.TestCase):
         ]:
             epoch = self.module.transition_metadata(epoch, state, now=LATER, evidence=evidence)
 
+        epoch = self.module.transition_metadata(
+            epoch,
+            "promotion_committing",
+            now=LATER,
+            evidence={"release_sha": REPAIR_SHA, "release_ref": "refs/heads/release/stable"},
+        )
         with self.assertRaisesRegex(self.module.StateError, "release_sha"):
             self.module.transition_metadata(
                 epoch,
@@ -284,6 +466,46 @@ class StateMachineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(self.module.StateError, "duplicate source beads"):
             self.module.validate_epoch_candidates([first, second], base_sha=BASE_SHA)
+
+
+    def test_epoch_history_is_bounded_and_exact_replay_does_not_append(self) -> None:
+        epoch = self.module.transition_metadata(
+            self.epoch(), "landed", now=LATER, evidence={"landed_sha": LANDED_SHA}
+        )
+        epoch = self.module.transition_metadata(epoch, "verifying", now=LATER)
+        for index in range(80):
+            epoch = self.module.transition_metadata(
+                epoch,
+                "red",
+                now=LATER,
+                evidence={
+                    "failure_class": "test_failure",
+                    "evidence_ref": f"artifact://failure-{index}",
+                },
+            )
+            epoch = self.module.transition_metadata(
+                epoch,
+                "repairing",
+                now=LATER,
+                evidence={"repair_bead_ids": [f"sp-fix-{index}"]},
+            )
+            epoch = self.module.transition_metadata(
+                epoch,
+                "verifying",
+                now=LATER,
+                evidence={"landed_sha": REPAIR_SHA},
+            )
+        replayed = self.module.transition_metadata(
+            epoch,
+            "verifying",
+            now="2026-08-18T14:00:00Z",
+            evidence={"landed_sha": REPAIR_SHA},
+        )
+
+        self.assertEqual(replayed, epoch)
+        self.assertEqual(len(epoch["gc.thunderdome.history"]), 64)
+        sequences = [entry["seq"] for entry in epoch["gc.thunderdome.history"]]
+        self.assertEqual(sequences, list(range(sequences[0], sequences[0] + 64)))
 
 
 class ProjectionTests(unittest.TestCase):
@@ -332,6 +554,7 @@ class ProjectionTests(unittest.TestCase):
                 ("verifying", {}),
                 ("verified", {"verified_sha": LANDED_SHA, "verification_ref": "artifact://gate"}),
                 ("promoting", {}),
+                ("promotion_committing", {"release_sha": LANDED_SHA, "release_ref": "refs/heads/release/stable"}),
                 ("promoted", {"release_sha": LANDED_SHA, "release_ref": "refs/heads/release/stable"}),
             ],
         }
@@ -488,6 +711,42 @@ class ProjectionTests(unittest.TestCase):
         self.assertNotIn("review.json", output)
 
 
+
+
+class DeployedOrderContractTests(unittest.TestCase):
+    ORDER_PATH = (
+        pathlib.Path(__file__).resolve().parents[3]
+        / "gc-city"
+        / "orders"
+        / "thunderdome-sprocket.toml"
+    )
+
+    def test_sprocket_reconcile_uses_city_cooldown_contract(self) -> None:
+        if not self.ORDER_PATH.is_file():
+            self.skipTest("deployed dogfood city order is not present")
+        data = tomllib.loads(self.ORDER_PATH.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            data,
+            {
+                "order": {
+                    "description": "Reconcile the Sprocket Continuous Thunderdome queue",
+                    "trigger": "cooldown",
+                    "interval": "1m",
+                    "scope": "city",
+                    "timeout": "60s",
+                    "idempotent": False,
+                    "no_work_gate": False,
+                    "exec": (
+                        "git -C /home/exedev/workspace/sprocket fetch --no-tags origin "
+                        "refs/heads/main && trunk_sha=$(git -C /home/exedev/workspace/sprocket "
+                        "rev-parse FETCH_HEAD) && gc gc thunderdome --rig sprocket reconcile "
+                        "--trunk-sha $trunk_sha --target-ref refs/heads/main --max-depth 8 "
+                        "--max-age-seconds 1800 --full-gate-command 'just ci' --json"
+                    ),
+                }
+            },
+        )
 
 
 class FormulaContractTests(unittest.TestCase):
@@ -777,6 +1036,9 @@ class FormulaContractTests(unittest.TestCase):
 
         self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py", freeze)
         self.assertIn("epoch open", freeze)
+        self.assertIn("already-sealed epoch", freeze)
+        self.assertIn("durable control intent", freeze)
+        self.assertNotIn("leaves no partial epoch", freeze)
         self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py", assemble)
         self.assertIn("epoch transition", assemble)
         self.assertIn("fix forward", repair.lower())
@@ -873,39 +1135,47 @@ class ReconcilePlannerTests(unittest.TestCase):
         self.assertEqual(plan["active_epoch_ids"], ["sp-epoch-a"])
 
     def test_reconcile_resumes_an_undispatched_assembling_epoch(self) -> None:
-        candidate = self.candidate("sp-candidate-a", NOW)
-        candidate["metadata"] = self.module.transition_metadata(
-            candidate["metadata"], "frozen", now=NOW, evidence={"epoch_id": "sp-epoch-a"}
+        runner = DeterministicRunner(self.module)
+        candidate_metadata = self.module.new_candidate_metadata(
+            source_beads=["sp-source-a"],
+            delivery_unit="delivery-a",
+            commit=COMMIT_SHA,
+            base_sha=BASE_SHA,
+            summary_path="/summary-a.json",
+            review_path="/review-a.json",
+            now=NOW,
         )
-        epoch = {
-            "id": "sp-epoch-a",
-            "metadata": self.module.new_epoch_metadata(
-                candidate_ids=["sp-candidate-a"],
-                base_sha=BASE_SHA,
-                target_ref="refs/heads/main",
-                now=NOW,
-            ),
-        }
-        calls = []
-
-        class Client:
-            def list_thunderdome(_self):
-                return [candidate, epoch]
-            def show(_self, _bead_ids):
-                return [{"id": "source-sp-candidate-a", "status": "in_progress"}]
-
-
-            def run(_self, args):
-                calls.append(list(args))
-                return {"workflow_id": "sp-workflow-a"}
-
-            def update_metadata(_self, bead_id, metadata):
-                self.assertEqual(bead_id, "sp-epoch-a")
-                self.assertEqual(
-                    metadata["gc.thunderdome.workflow_id"], "sp-workflow-a"
-                )
-                return {"id": bead_id, "metadata": metadata}
-
+        candidate_id = self.module.candidate_record_id(candidate_metadata)
+        epoch_metadata = self.module.new_epoch_metadata(
+            candidate_ids=[candidate_id],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        epoch_id = self.module.epoch_record_id(epoch_metadata)
+        candidate_metadata = self.module.transition_metadata(
+            candidate_metadata,
+            "frozen",
+            now=NOW,
+            evidence={"epoch_id": epoch_id},
+        )
+        runner.add(
+            "sp-source-a",
+            metadata={self.module.CANDIDATE_ID: candidate_id},
+        )
+        runner.add(candidate_id, envelope=candidate_metadata)
+        runner.add(epoch_id, envelope=epoch_metadata)
+        runner.add(
+            self.module.control_record_id([candidate_id]),
+            metadata={
+                self.module.PREFIX + "schema": self.module.SCHEMA,
+                self.module.KIND: "control",
+                self.module.ACTIVE_EPOCH: self.module.canonical_json(
+                    self.module.epoch_intent(epoch_id, epoch_metadata)
+                ),
+            },
+        )
+        client = self.module.BeadClient(rig="sprocket", runner=runner)
         args = self.module.argparse.Namespace(
             rig="sprocket",
             now=LATER,
@@ -917,11 +1187,18 @@ class ReconcilePlannerTests(unittest.TestCase):
             operator="gc.run-operator",
             target_ref="refs/heads/main",
         )
-        result = self.module.reconcile(Client(), args)
+
+        result = self.module.reconcile(client, args)
+
         self.assertEqual(result["action"], "dispatched")
-        self.assertEqual(result["workflow_id"], "sp-workflow-a")
-        self.assertEqual(calls[0][:4], ["sling", "sprocket/gc.run-operator", "sp-epoch-a", "--on"])
-        self.assertIn("full_gate_command=just ci", calls[0])
+        self.assertEqual(result["workflow_id"], f"wf-{epoch_id}")
+        sling = next(call for call in runner.calls if "sling" in call)
+        command_index = sling.index("sling")
+        self.assertEqual(
+            sling[command_index : command_index + 4],
+            ["sling", "sprocket/gc.run-operator", epoch_id, "--on"],
+        )
+        self.assertIn("full_gate_command=just ci", sling)
 
 
     def test_reconcile_fails_closed_on_projection_invariants(self) -> None:
@@ -949,8 +1226,1032 @@ class ReconcilePlannerTests(unittest.TestCase):
             operator="gc.run-operator",
             target_ref="refs/heads/main",
         )
-        with self.assertRaisesRegex(self.module.StateError, "invariant"):
-            self.module.reconcile(Client(), args)
+        result = self.module.reconcile(Client(), args)
+        self.assertEqual(result["action"], "would_repair")
+        self.assertTrue(result["repair_reasons"])
+
+
+class RecoveryProtocolTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_module()
+
+    def setUp(self) -> None:
+        self.runner = DeterministicRunner(self.module)
+        self.client = self.module.BeadClient(rig="sprocket", runner=self.runner)
+
+    def add_source(self, source_id: str) -> None:
+        self.runner.add(source_id, metadata={})
+
+    def enqueue(
+        self,
+        source_ids: list[str],
+        *,
+        delivery: str = "delivery-a",
+        commit: str = COMMIT_SHA,
+    ) -> dict:
+        return self.module.enqueue_candidate(
+            self.client,
+            self.module.argparse.Namespace(
+                source_bead=source_ids,
+                delivery_unit=delivery,
+                commit=commit,
+                base_sha=BASE_SHA,
+                summary_path=f"/{delivery}-summary.json",
+                review_path=f"/{delivery}-review.json",
+                now=NOW,
+            ),
+        )
+
+    def open_epoch(self, candidate_ids: list[str]) -> dict:
+        return self.module.open_epoch(
+            self.client,
+            self.module.argparse.Namespace(
+                candidate=candidate_ids,
+                base_sha=BASE_SHA,
+                target_ref="refs/heads/main",
+                now=NOW,
+            ),
+        )
+
+    def transition(self, epoch_id: str, state: str, **evidence) -> dict:
+        values = {
+            "epoch_id": epoch_id,
+            "state": state,
+            "landed_sha": None,
+            "verified_sha": None,
+            "release_sha": None,
+            "release_ref": None,
+            "pr_url": None,
+            "failure_class": None,
+            "evidence_ref": None,
+            "verification_ref": None,
+            "repair_bead": None,
+            "now": LATER,
+        }
+        values.update(evidence)
+        return self.module.transition_epoch(
+            self.client, self.module.argparse.Namespace(**values)
+        )
+
+    def reconcile_args(self, *, dry_run: bool = False):
+        return self.module.argparse.Namespace(
+            rig="sprocket",
+            now=LATER,
+            trunk_sha=BASE_SHA,
+            max_depth=8,
+            max_age_seconds=0,
+            dry_run=dry_run,
+            full_gate_command="just ci",
+            operator="gc.run-operator",
+            target_ref="refs/heads/main",
+        )
+
+    def allow_legacy_migration(self) -> None:
+        key = "GC_THUNDERDOME_ALLOW_LEGACY_MIGRATION"
+        previous = self.module.os.environ.get(key)
+        self.module.os.environ[key] = "1"
+
+        def restore() -> None:
+            if previous is None:
+                self.module.os.environ.pop(key, None)
+            else:
+                self.module.os.environ[key] = previous
+
+        self.addCleanup(restore)
+
+    def test_concurrent_same_key_enqueue_converges_to_one_candidate(self) -> None:
+        self.add_source("sp-source-a")
+
+        first = self.enqueue(["sp-source-a"])
+        replay = self.enqueue(["sp-source-a"])
+
+        self.assertEqual(first["id"], replay["id"])
+        candidates = [
+            record
+            for record in self.runner.records.values()
+            if record.get("metadata", {}).get(self.module.KIND) == "candidate"
+        ]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"][self.module.CANDIDATE_ID],
+            first["id"],
+        )
+        metadata = self.module.record_metadata(
+            self.client.authoritative_reread(str(first["id"]))
+        )
+        self.assertEqual(
+            first["id"],
+            f"sp-tdc-{metadata[self.module.PREFIX + 'candidate_key'][:12]}",
+        )
+        self.assertEqual(len(metadata[self.module.HISTORY]), 1)
+
+    def test_overlapping_different_keys_cannot_both_be_active_and_loser_rolls_back(self) -> None:
+        self.add_source("sp-source-a")
+        self.add_source("sp-source-b")
+        winner = self.enqueue(["sp-source-b"], delivery="winner")
+        loser_metadata = self.module.new_candidate_metadata(
+            source_beads=["sp-source-a", "sp-source-b"],
+            delivery_unit="loser",
+            commit=LANDED_SHA,
+            base_sha=BASE_SHA,
+            summary_path="/loser-summary.json",
+            review_path="/loser-review.json",
+            now=NOW,
+        )
+        loser_id = self.module.candidate_record_id(loser_metadata)
+
+        with self.assertRaisesRegex(self.module.StateError, "reserved by candidate"):
+            self.enqueue(
+                ["sp-source-a", "sp-source-b"],
+                delivery="loser",
+                commit=LANDED_SHA,
+            )
+
+        loser = self.client.authoritative_reread(loser_id)
+        self.assertEqual(
+            self.module.record_metadata(loser)[self.module.STATE], "rejected"
+        )
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"].get(
+                self.module.CANDIDATE_ID, ""
+            ),
+            "",
+        )
+        self.assertEqual(
+            self.runner.records["sp-source-b"]["metadata"][
+                self.module.CANDIDATE_ID
+            ],
+            winner["id"],
+        )
+
+    def test_rejected_retry_releases_reservations_from_prior_attempt(self) -> None:
+        self.add_source("sp-source-a")
+        self.add_source("sp-source-b")
+        winner = self.enqueue(["sp-source-b"], delivery="winner")
+        loser_metadata = self.module.new_candidate_metadata(
+            source_beads=["sp-source-a", "sp-source-b"],
+            delivery_unit="loser",
+            commit=LANDED_SHA,
+            base_sha=BASE_SHA,
+            summary_path="/loser-summary.json",
+            review_path="/loser-review.json",
+            now=NOW,
+        )
+        loser_id = self.module.candidate_record_id(loser_metadata)
+        self.client.create_or_validate(
+            loser_id,
+            "partial loser",
+            "thunderdome-candidate",
+            loser_metadata,
+        )
+        self.assertTrue(
+            self.client.metadata_cas(
+                "sp-source-a", self.module.CANDIDATE_ID, "", loser_id
+            )
+        )
+
+        with self.assertRaisesRegex(self.module.StateError, "reserved by candidate"):
+            self.enqueue(
+                ["sp-source-a", "sp-source-b"],
+                delivery="loser",
+                commit=LANDED_SHA,
+            )
+
+        loser = self.client.authoritative_reread(loser_id)
+        self.assertEqual(
+            self.module.record_metadata(loser)[self.module.STATE], "rejected"
+        )
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"].get(
+                self.module.CANDIDATE_ID, ""
+            ),
+            "",
+        )
+        self.assertEqual(
+            self.runner.records["sp-source-b"]["metadata"][
+                self.module.CANDIDATE_ID
+            ],
+            winner["id"],
+        )
+
+    def test_disjoint_epoch_opens_elect_exactly_one_active_epoch(self) -> None:
+        self.add_source("sp-source-a")
+        self.add_source("sp-source-b")
+        first_candidate = self.enqueue(["sp-source-a"], delivery="first")
+        second_candidate = self.enqueue(
+            ["sp-source-b"], delivery="second", commit=LANDED_SHA
+        )
+        first_epoch = self.open_epoch([str(first_candidate["id"])])
+
+        with self.assertRaisesRegex(self.module.StateError, "already owns"):
+            self.open_epoch([str(second_candidate["id"])])
+
+        epochs = [
+            record
+            for record in self.runner.records.values()
+            if record.get("metadata", {}).get(self.module.KIND) == "epoch"
+        ]
+        self.assertEqual(len(epochs), 1)
+        control_id = self.module.control_record_id([str(first_candidate["id"])])
+        active = self.runner.records[control_id]["metadata"][
+            self.module.ACTIVE_EPOCH
+        ]
+        self.assertEqual(
+            self.module.parse_epoch_intent(active)["epoch_id"], first_epoch["id"]
+        )
+
+    def test_enqueue_replays_after_create_and_reservation_boundaries(self) -> None:
+        for boundary in range(1, 3):
+            with self.subTest(boundary=boundary):
+                runner = DeterministicRunner(self.module)
+                runner.add("sp-source-a", metadata={})
+                client = self.module.BeadClient(rig="sprocket", runner=runner)
+                args = self.module.argparse.Namespace(
+                    source_bead=["sp-source-a"],
+                    delivery_unit="delivery-a",
+                    commit=COMMIT_SHA,
+                    base_sha=BASE_SHA,
+                    summary_path="/summary.json",
+                    review_path="/review.json",
+                    now=NOW,
+                )
+                runner.crash_at = boundary
+                with self.assertRaises(InjectedCrash):
+                    self.module.enqueue_candidate(client, args)
+                runner.crash_at = None
+
+                candidate = self.module.enqueue_candidate(client, args)
+
+                self.assertEqual(
+                    runner.records["sp-source-a"]["metadata"][
+                        self.module.CANDIDATE_ID
+                    ],
+                    candidate["id"],
+                )
+                self.assertEqual(
+                    len(
+                        [
+                            record
+                            for record in runner.records.values()
+                            if record.get("metadata", {}).get(self.module.KIND)
+                            == "candidate"
+                        ]
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    len(
+                        self.module.record_metadata(
+                            client.authoritative_reread(str(candidate["id"]))
+                        )[self.module.HISTORY]
+                    ),
+                    1,
+                )
+
+
+    def test_open_epoch_replays_after_every_durable_mutation_boundary(self) -> None:
+        for boundary in range(1, 5):
+            with self.subTest(boundary=boundary):
+                runner = DeterministicRunner(self.module)
+                runner.add("sp-source-a", metadata={})
+                client = self.module.BeadClient(rig="sprocket", runner=runner)
+                candidate = self.module.enqueue_candidate(
+                    client,
+                    self.module.argparse.Namespace(
+                        source_bead=["sp-source-a"],
+                        delivery_unit="delivery-a",
+                        commit=COMMIT_SHA,
+                        base_sha=BASE_SHA,
+                        summary_path="/summary.json",
+                        review_path="/review.json",
+                        now=NOW,
+                    ),
+                )
+                args = self.module.argparse.Namespace(
+                    candidate=[str(candidate["id"])],
+                    base_sha=BASE_SHA,
+                    target_ref="refs/heads/main",
+                    now=NOW,
+                )
+                runner.crash_at = runner.mutations + boundary
+                with self.assertRaises(InjectedCrash):
+                    self.module.open_epoch(client, args)
+                runner.crash_at = None
+                args.now = LATER
+
+                epoch = self.module.open_epoch(client, args)
+
+                self.assertEqual(
+                    self.module.record_metadata(
+                        client.authoritative_reread(str(candidate["id"]))
+                    )[self.module.STATE],
+                    "frozen",
+                )
+                self.assertEqual(
+                    len(
+                        [
+                            record
+                            for record in runner.records.values()
+                            if record.get("metadata", {}).get(self.module.KIND)
+                            == "epoch"
+                        ]
+                    ),
+                    1,
+                )
+                active = runner.records[
+                    self.module.control_record_id([str(candidate["id"])])
+                ]["metadata"][self.module.ACTIVE_EPOCH]
+                self.assertEqual(
+                    self.module.parse_epoch_intent(active)["epoch_id"], epoch["id"]
+                )
+
+    def test_dispatch_lost_response_replays_same_graph_root(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        args = self.reconcile_args()
+        self.runner.lose_next_sling = True
+
+        with self.assertRaises(self.module.CommandError):
+            self.module._dispatch_epoch(self.client, args, epoch)
+        result = self.module._dispatch_epoch(self.client, args, epoch)
+
+        self.assertEqual(self.runner.sling_effects, 1)
+        self.assertEqual(result["workflow_id"], f"wf-{epoch['id']}")
+        persisted = self.module.record_metadata(
+            self.client.authoritative_reread(str(epoch["id"]))
+        )
+        self.assertEqual(
+            persisted[self.module.PREFIX + "workflow_id"], result["workflow_id"]
+        )
+        sling_envs = [
+            env
+            for call, env in zip(self.runner.calls, self.runner.envs)
+            if "sling" in call
+        ]
+        self.assertTrue(sling_envs)
+        self.assertEqual(
+            sling_envs[0]["GC_EXPECTED_FORMULA_FINGERPRINT"],
+            persisted[self.module.DISPATCH_INTENT]["formula_digest"],
+        )
+
+    def test_dispatch_refuses_changed_intent_after_lost_response(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        args = self.reconcile_args()
+        self.runner.lose_next_sling = True
+
+        with self.assertRaises(self.module.CommandError):
+            self.module._dispatch_epoch(self.client, args, epoch)
+        args.full_gate_command = "just changed-gate"
+        with self.assertRaisesRegex(self.module.StateError, "sealed intent"):
+            self.module._dispatch_epoch(self.client, args, epoch)
+        self.assertEqual(self.runner.sling_effects, 1)
+        persisted = self.module.record_metadata(
+            self.client.authoritative_reread(str(epoch["id"]))
+        )
+        self.assertEqual(
+            persisted[self.module.DISPATCH_INTENT]["full_gate_command"],
+            "just ci",
+        )
+
+    def test_dispatch_refuses_formula_change_between_seal_and_launch(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        self.runner.change_formula_after_show = True
+
+        with self.assertRaises(self.module.CommandError):
+            self.module._dispatch_epoch(self.client, self.reconcile_args(), epoch)
+
+        self.assertEqual(self.runner.sling_effects, 0)
+        persisted = self.module.record_metadata(
+            self.client.authoritative_reread(str(epoch["id"]))
+        )
+        self.assertNotIn(self.module.PREFIX + "workflow_id", persisted)
+
+
+
+    def test_dispatch_refuses_changed_formula_digest(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        args = self.reconcile_args()
+        original_digest = self.module._dispatch_formula_digest
+        try:
+            self.module._dispatch_formula_digest = (
+                lambda _client, _args, _metadata: "a" * 64
+            )
+            self.module._seal_dispatch_intent(self.client, str(epoch["id"]), args)
+            self.module._dispatch_formula_digest = (
+                lambda _client, _args, _metadata: "b" * 64
+            )
+            with self.assertRaisesRegex(self.module.StateError, "sealed intent"):
+                self.module._seal_dispatch_intent(
+                    self.client, str(epoch["id"]), args
+                )
+        finally:
+            self.module._dispatch_formula_digest = original_digest
+
+    def test_abandoned_epoch_releases_reservations_with_owner_cas(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        epoch_id = str(epoch["id"])
+
+        self.transition(
+            epoch_id,
+            "cancelled",
+            failure_class="cancelled",
+            evidence_ref="artifact://cancelled",
+        )
+
+        candidate_record = self.client.authoritative_reread(str(candidate["id"]))
+        self.assertEqual(
+            self.module.record_metadata(candidate_record)[self.module.STATE],
+            "rejected",
+        )
+        self.assertEqual(candidate_record["status"], "closed")
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"][
+                self.module.CANDIDATE_ID
+            ],
+            "",
+        )
+        control_id = self.module.control_record_id([str(candidate["id"])])
+        self.assertEqual(
+            self.runner.records[control_id]["metadata"][self.module.ACTIVE_EPOCH],
+            "",
+        )
+
+
+    def test_transition_replay_marks_event_once_and_closes_sources_once(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        epoch_id = str(epoch["id"])
+        self.transition(epoch_id, "landed", landed_sha=LANDED_SHA)
+        self.transition(epoch_id, "verifying")
+        self.transition(
+            epoch_id,
+            "verified",
+            verified_sha=LANDED_SHA,
+            verification_ref="artifact://gate",
+        )
+        self.transition(epoch_id, "promoting")
+        self.transition(
+            epoch_id,
+            "promoted",
+            release_sha=LANDED_SHA,
+            release_ref="refs/heads/release/stable",
+        )
+        event_count = len(self.runner.events)
+        history = list(
+            self.module.record_metadata(
+                self.client.authoritative_reread(epoch_id)
+            )[self.module.HISTORY]
+        )
+
+        self.transition(
+            epoch_id,
+            "promoted",
+            release_sha=LANDED_SHA,
+            release_ref="refs/heads/release/stable",
+        )
+
+        source = self.runner.records["sp-source-a"]
+        self.assertEqual(source["status"], "closed")
+        self.assertEqual(
+            source["metadata"][self.module.PROMOTED_BY], epoch_id
+        )
+        self.assertEqual(source["metadata"][self.module.CANDIDATE_ID], "")
+        self.assertEqual(self.runner.close_effects["sp-source-a"], 1)
+        self.assertEqual(len(self.runner.events), event_count)
+        self.assertEqual(
+            self.module.record_metadata(
+                self.client.authoritative_reread(epoch_id)
+            )[self.module.HISTORY],
+            history,
+        )
+
+    def test_promotion_rejects_unsealed_evidence_fields(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        epoch_id = str(epoch["id"])
+        self.transition(epoch_id, "landed", landed_sha=LANDED_SHA)
+        self.transition(epoch_id, "verifying")
+        self.transition(
+            epoch_id,
+            "verified",
+            verified_sha=LANDED_SHA,
+            verification_ref="artifact://gate",
+        )
+        self.transition(epoch_id, "promoting")
+
+        with self.assertRaisesRegex(
+            self.module.StateError, "unsupported evidence fields: pr_url"
+        ):
+            self.transition(
+                epoch_id,
+                "promoted",
+                release_sha=LANDED_SHA,
+                release_ref="refs/heads/release/stable",
+                pr_url="https://example.invalid/pull/1",
+            )
+
+        persisted = self.module.record_metadata(
+            self.client.authoritative_reread(epoch_id)
+        )
+        self.assertEqual(persisted[self.module.STATE], "promoting")
+
+    def test_event_marker_emits_each_claimed_history_state(self) -> None:
+        metadata = self.module.new_epoch_metadata(
+            candidate_ids=["sp-candidate-a"],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        metadata = self.module.transition_metadata(
+            metadata,
+            "landed",
+            now=LATER,
+            evidence={"landed_sha": LANDED_SHA},
+        )
+        metadata = self.module.transition_metadata(
+            metadata,
+            "verifying",
+            now=LATER,
+        )
+        metadata = self.module.transition_metadata(
+            metadata,
+            "verified",
+            now=LATER,
+            evidence={
+                "verified_sha": LANDED_SHA,
+                "verification_ref": "artifact://gate",
+            },
+        )
+        metadata[self.module.EMITTED_SEQ] = 0
+        runner = DeterministicRunner(self.module)
+        runner.add("sp-epoch", envelope=metadata)
+        client = self.module.BeadClient(runner=runner)
+
+        self.module._mark_and_emit_transition(client, {"id": "sp-epoch"})
+
+        self.assertEqual(
+            [
+                (event["state"], event["transition_seq"])
+                for event in runner.events
+            ],
+            [("landed", 1), ("verifying", 2), ("verified", 3)],
+        )
+
+    def test_event_marker_drains_full_history_after_cas_conflict(self) -> None:
+        metadata = self.module.new_epoch_metadata(
+            candidate_ids=["sp-candidate-a"],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        metadata[self.module.HISTORY] = [
+            {"seq": seq, "to": "landed"} for seq in range(self.module.MAX_HISTORY)
+        ]
+        metadata[self.module.EMITTED_SEQ] = -1
+        runner = DeterministicRunner(self.module)
+        runner.add("sp-epoch", envelope=metadata)
+        client = self.module.BeadClient(runner=runner)
+        original_cas = client.cas_envelope
+        conflicts = 0
+
+        def conflict_once(record, updated):
+            nonlocal conflicts
+            if conflicts == 0:
+                conflicts += 1
+                return None
+            return original_cas(record, updated)
+
+        client.cas_envelope = conflict_once
+        marked = self.module._mark_and_emit_transition(client, {"id": "sp-epoch"})
+
+        self.assertEqual(
+            self.module.record_metadata(marked)[self.module.EMITTED_SEQ],
+            self.module.MAX_HISTORY - 1,
+        )
+        self.assertEqual(len(runner.events), self.module.MAX_HISTORY + 1)
+
+    def test_promotion_replays_after_every_terminal_mutation_boundary(self) -> None:
+        for boundary in range(1, 9):
+            with self.subTest(boundary=boundary):
+                self.runner = DeterministicRunner(self.module)
+                self.client = self.module.BeadClient(
+                    rig="sprocket", runner=self.runner
+                )
+                self.add_source("sp-source-a")
+                candidate = self.enqueue(["sp-source-a"])
+                epoch = self.open_epoch([str(candidate["id"])])
+                epoch_id = str(epoch["id"])
+                self.transition(epoch_id, "landed", landed_sha=LANDED_SHA)
+                self.transition(epoch_id, "verifying")
+                self.transition(
+                    epoch_id,
+                    "verified",
+                    verified_sha=LANDED_SHA,
+                    verification_ref="artifact://gate",
+                )
+                self.transition(epoch_id, "promoting")
+                self.runner.crash_at = self.runner.mutations + boundary
+
+                with self.assertRaises(InjectedCrash):
+                    self.transition(
+                        epoch_id,
+                        "promoted",
+                        release_sha=LANDED_SHA,
+                        release_ref="refs/heads/release/stable",
+                    )
+                self.runner.crash_at = None
+                self.transition(
+                    epoch_id,
+                    "promoted",
+                    release_sha=LANDED_SHA,
+                    release_ref="refs/heads/release/stable",
+                )
+
+                source = self.runner.records["sp-source-a"]
+                self.assertEqual(source["status"], "closed")
+                self.assertEqual(
+                    source["metadata"][self.module.PROMOTED_BY], epoch_id
+                )
+                self.assertEqual(
+                    source["metadata"][self.module.CANDIDATE_ID], ""
+                )
+                self.assertEqual(self.runner.close_effects["sp-source-a"], 1)
+                history = self.module.record_metadata(
+                    self.client.authoritative_reread(epoch_id)
+                )[self.module.HISTORY]
+                self.assertEqual(
+                    [entry["to"] for entry in history].count("promoted"), 1
+                )
+
+
+    def test_closed_source_without_matching_provenance_fails_closed(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        epoch_id = str(epoch["id"])
+        self.transition(epoch_id, "landed", landed_sha=LANDED_SHA)
+        self.transition(epoch_id, "verifying")
+        self.transition(
+            epoch_id,
+            "verified",
+            verified_sha=LANDED_SHA,
+            verification_ref="artifact://gate",
+        )
+        self.transition(epoch_id, "promoting")
+        self.runner.records["sp-source-a"]["status"] = "closed"
+
+        with self.assertRaisesRegex(self.module.StateError, "provenance"):
+            self.transition(
+                epoch_id,
+                "promoted",
+                release_sha=LANDED_SHA,
+                release_ref="refs/heads/release/stable",
+            )
+
+        self.assertNotIn(
+            self.module.PROMOTED_BY,
+            self.runner.records["sp-source-a"]["metadata"],
+        )
+
+    def test_reconcile_materializes_epoch_from_durable_active_intent(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch_metadata = self.module.new_epoch_metadata(
+            candidate_ids=[str(candidate["id"])],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        epoch_id = self.module.epoch_record_id(epoch_metadata)
+        control_id = self.module.control_record_id([str(candidate["id"])])
+        self.runner.add(
+            control_id,
+            metadata={
+                self.module.PREFIX + "schema": self.module.SCHEMA,
+                self.module.KIND: "control",
+                self.module.ACTIVE_EPOCH: self.module.canonical_json(
+                    self.module.epoch_intent(epoch_id, epoch_metadata)
+                ),
+            },
+        )
+
+        result = self.module.reconcile(self.client, self.reconcile_args())
+
+        self.assertEqual(result["action"], "dispatched")
+        self.assertIn(epoch_id, self.runner.records)
+        self.assertEqual(
+            self.module.record_metadata(
+                self.client.authoritative_reread(str(candidate["id"]))
+            )[self.module.PREFIX + "epoch_id"],
+            epoch_id,
+        )
+
+
+    def test_reconcile_repairs_legacy_partial_freeze_before_projection(self) -> None:
+        self.add_source("sp-source-a")
+        self.allow_legacy_migration()
+        candidate_metadata = self.module.new_candidate_metadata(
+            source_beads=["sp-source-a"],
+            delivery_unit="legacy",
+            commit=COMMIT_SHA,
+            base_sha=BASE_SHA,
+            summary_path="/legacy-summary.json",
+            review_path="/legacy-review.json",
+            now=NOW,
+        )
+        candidate_id = self.module.candidate_record_id(candidate_metadata)
+        epoch_metadata = self.module.new_epoch_metadata(
+            candidate_ids=[candidate_id],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        epoch_id = "sp-legacy-random"
+        self.runner.add(candidate_id, metadata=candidate_metadata)
+        self.runner.add(epoch_id, metadata=epoch_metadata)
+        self.runner.records["sp-source-a"]["metadata"][
+            self.module.CANDIDATE_ID
+        ] = candidate_id
+
+        result = self.module.reconcile(self.client, self.reconcile_args())
+
+        self.assertEqual(result["action"], "dispatched")
+        self.assertIn(
+            self.module.RECORD, self.runner.records[candidate_id]["metadata"]
+        )
+        self.assertIn(self.module.RECORD, self.runner.records[epoch_id]["metadata"])
+        self.assertNotIn(
+            self.module.epoch_record_id(epoch_metadata), self.runner.records
+        )
+        candidate = self.client.authoritative_reread(candidate_id)
+        self.assertEqual(
+            self.module.record_metadata(candidate)[self.module.STATE], "frozen"
+        )
+        projection = self.module.read_projection(self.client, LATER, BASE_SHA)
+        self.assertTrue(projection["ok"], projection["violations"])
+
+
+    def test_epoch_open_refuses_a_legacy_active_epoch_without_control(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        legacy = self.module.new_epoch_metadata(
+            candidate_ids=["sp-existing-candidate"],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        self.runner.add("sp-legacy-active", metadata=legacy)
+
+        with self.assertRaisesRegex(
+            self.module.StateError, "active epoch records already exist"
+        ):
+            self.open_epoch([str(candidate["id"])])
+
+    def test_promotion_refuses_an_unrelated_concurrent_source_close(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        candidate_id = str(candidate["id"])
+        original_cas = self.client.metadata_cas
+
+        def closing_cas(bead_id, key, expected, value):
+            swapped = original_cas(bead_id, key, expected, value)
+            if swapped and key == self.module.PROMOTED_BY:
+                source = self.runner.records[bead_id]
+                source["status"] = "closed"
+                source["close_reason"] = "closed by another operator"
+            return swapped
+
+        self.client.metadata_cas = closing_cas
+        with self.assertRaisesRegex(
+            self.module.StateError, "closed outside epoch"
+        ):
+            self.module._converge_promoted_source(
+                self.client,
+                "sp-source-a",
+                candidate_id,
+                "sp-epoch",
+                LANDED_SHA,
+            )
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"][
+                self.module.PROMOTED_BY
+            ],
+            "",
+        )
+
+    def test_event_marker_remains_retryable_when_emission_fails(self) -> None:
+        metadata = self.module.new_epoch_metadata(
+            candidate_ids=["sp-candidate-a"],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        metadata = self.module.transition_metadata(
+            metadata,
+            "landed",
+            now=LATER,
+            evidence={"landed_sha": LANDED_SHA},
+        )
+        metadata[self.module.EMITTED_SEQ] = 0
+        self.runner.add("sp-epoch", envelope=metadata)
+        original_emit = self.client.emit_transition
+
+        def fail_emit(*_args):
+            raise self.module.CommandError("event provider rejected submission")
+
+        self.client.emit_transition = fail_emit
+        with self.assertRaisesRegex(self.module.CommandError, "rejected"):
+            self.module._mark_and_emit_transition(self.client, {"id": "sp-epoch"})
+        persisted = self.module.record_metadata(
+            self.client.authoritative_reread("sp-epoch")
+        )
+
+        self.assertEqual(persisted[self.module.EMITTED_SEQ], 0)
+
+        self.client.emit_transition = original_emit
+        self.module._mark_and_emit_transition(self.client, {"id": "sp-epoch"})
+        self.assertEqual(
+            [(event["state"], event["transition_seq"]) for event in self.runner.events],
+            [("landed", 1)],
+        )
+
+    def test_legacy_envelope_migration_requires_an_explicit_quiescent_gate(self) -> None:
+        metadata = self.module.new_candidate_metadata(
+            source_beads=["sp-source-a"],
+            delivery_unit="legacy",
+            commit=COMMIT_SHA,
+            base_sha=BASE_SHA,
+            summary_path="/legacy-summary.json",
+            review_path="/legacy-review.json",
+            now=NOW,
+        )
+        candidate_id = self.module.candidate_record_id(metadata)
+        self.runner.add(candidate_id, metadata=metadata)
+
+        with self.assertRaisesRegex(
+            self.module.StateError, "requires a quiescent one-time migration"
+        ):
+            self.client.authoritative_reread(candidate_id)
+        self.assertNotIn(
+            self.module.RECORD, self.runner.records[candidate_id]["metadata"]
+        )
+
+    def test_reconcile_dry_run_reports_repair_without_mutation(self) -> None:
+        self.add_source("sp-source-a")
+        metadata = self.module.new_candidate_metadata(
+            source_beads=["sp-source-a"],
+            delivery_unit="legacy",
+            commit=COMMIT_SHA,
+            base_sha=BASE_SHA,
+            summary_path="/legacy-summary.json",
+            review_path="/legacy-review.json",
+            now=NOW,
+        )
+        candidate_id = self.module.candidate_record_id(metadata)
+        self.runner.add(candidate_id, metadata=metadata)
+        before = DeterministicRunner._copy(self.runner.records)
+        mutations = self.runner.mutations
+
+        result = self.module.reconcile(
+            self.client, self.reconcile_args(dry_run=True)
+        )
+
+        self.assertEqual(result["action"], "would_repair")
+        self.assertEqual(self.runner.mutations, mutations)
+        self.assertEqual(self.runner.records, before)
+
+
+class GitWorkflowIntegrationTests(unittest.TestCase):
+    ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.repo = pathlib.Path(self.tempdir.name)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "tests@example.invalid")
+        self.git("config", "user.name", "Thunderdome Tests")
+
+    def git(
+        self, *args: str, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check and result.returncode != 0:
+            self.fail(
+                f"git {' '.join(args)} failed ({result.returncode}): "
+                f"{result.stderr}"
+            )
+        return result
+
+    def commit_all(self, message: str) -> str:
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", message)
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
+    def test_real_candidate_conflict_is_resolved_without_omission(self) -> None:
+        artifact = self.repo / "artifact.txt"
+        artifact.write_text("base\n", encoding="utf-8")
+        base = self.commit_all("base")
+
+        self.git("switch", "-q", "-c", "candidate-a")
+        artifact.write_text("candidate-a\n", encoding="utf-8")
+        candidate_a = self.commit_all("candidate a")
+        self.git("switch", "-q", "-c", "candidate-b", base)
+        artifact.write_text("candidate-b\n", encoding="utf-8")
+        candidate_b = self.commit_all("candidate b")
+
+        self.git("switch", "-q", "-c", "integration", base)
+        self.git("cherry-pick", candidate_a)
+        conflict = self.git("cherry-pick", candidate_b, check=False)
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertEqual(
+            self.git("diff", "--name-only", "--diff-filter=U").stdout.strip(),
+            "artifact.txt",
+        )
+        artifact.write_text("candidate-a\ncandidate-b\n", encoding="utf-8")
+        self.git("add", "artifact.txt")
+        self.git("-c", "core.editor=true", "cherry-pick", "--continue")
+
+        self.assertEqual(
+            artifact.read_text(encoding="utf-8"),
+            "candidate-a\ncandidate-b\n",
+        )
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        assemble = (
+            self.ROOT / "assets" / "workflows" / "thunderdome-land" / "assemble-land.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Never bisect, omit, or reorder", assemble)
+        self.assertIn("conflicts while preserving all candidate behavior", assemble)
+
+    def test_semantic_repair_reintegration_runs_the_aggregate_gate(self) -> None:
+        min_setting = self.repo / "min_setting.py"
+        max_setting = self.repo / "max_setting.py"
+        gate = self.repo / "gate.py"
+        min_setting.write_text("MIN = 1\n", encoding="utf-8")
+        max_setting.write_text("MAX = 3\n", encoding="utf-8")
+        gate.write_text(
+            "from min_setting import MIN\nfrom max_setting import MAX\nassert MIN < MAX\n",
+            encoding="utf-8",
+        )
+        base = self.commit_all("base")
+
+        self.git("switch", "-q", "-c", "repair-min")
+        min_setting.write_text("MIN = 2\n", encoding="utf-8")
+        repair_min = self.commit_all("raise minimum")
+        self.git("switch", "-q", "-c", "repair-max", base)
+        max_setting.write_text("MAX = 2\n", encoding="utf-8")
+        repair_max = self.commit_all("lower maximum")
+
+        self.git("switch", "-q", "-c", "repair-integration", base)
+        self.git("cherry-pick", repair_min)
+        self.git("cherry-pick", repair_max)
+        failed_gate = subprocess.run(
+            [sys.executable, "gate.py"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(failed_gate.returncode, 0)
+
+        gate.write_text(
+            "from min_setting import MIN\nfrom max_setting import MAX\nassert MIN <= MAX\n",
+            encoding="utf-8",
+        )
+        self.commit_all("resolve aggregate semantic conflict")
+        passed_gate = subprocess.run(
+            [sys.executable, "gate.py"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(passed_gate.returncode, 0, passed_gate.stderr)
+        self.assertEqual(min_setting.read_text(encoding="utf-8"), "MIN = 2\n")
+        self.assertEqual(max_setting.read_text(encoding="utf-8"), "MAX = 2\n")
+        repair = (
+            self.ROOT / "assets" / "workflows" / "thunderdome-land" / "verify-repair.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("without omitting a repair", repair)
+        self.assertIn("repeat the full gate", repair)
 
 
 class AdapterTests(unittest.TestCase):
@@ -961,9 +2262,11 @@ class AdapterTests(unittest.TestCase):
 
     def test_client_scopes_commands_and_redacts_subprocess_output(self) -> None:
         calls: list[list[str]] = []
+        envs: list[dict[str, str]] = []
 
-        def runner(args, _env):
+        def runner(args, env):
             calls.append(list(args))
+            envs.append(dict(env))
             return subprocess.CompletedProcess(
                 args,
                 17,
@@ -977,12 +2280,20 @@ class AdapterTests(unittest.TestCase):
             rig="sprocket",
             runner=runner,
         )
-        with self.assertRaises(self.module.CommandError) as raised:
-            client.list_thunderdome()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(self.module.CommandError) as raised:
+                client.list_thunderdome()
+        with mock.patch.dict(
+            os.environ, {"BD_IGNORE_SCHEMA_SKEW": "caller-owned"}, clear=True
+        ):
+            with self.assertRaises(self.module.CommandError):
+                client.list_thunderdome()
 
         self.assertEqual(calls[0][:5], ["/bin/gc", "--city", "/city", "--rig", "sprocket"])
         self.assertNotIn("private-token", str(raised.exception))
         self.assertIn("exit 17", str(raised.exception))
+        self.assertNotIn("BD_IGNORE_SCHEMA_SKEW", envs[0])
+        self.assertEqual(envs[1]["BD_IGNORE_SCHEMA_SKEW"], "caller-owned")
 
     def test_client_decodes_structured_metadata_strings_and_rejects_malformed_values(self) -> None:
         candidate = self.module.new_candidate_metadata(
@@ -1039,7 +2350,7 @@ class AdapterTests(unittest.TestCase):
 
         def runner(args, _env):
             calls.append(list(args))
-            return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout='{"ok":true,"submitted":true}', stderr="")
 
         client = self.module.BeadClient(runner=runner)
         client.emit_transition("sp-epoch", "epoch", "red", 3)

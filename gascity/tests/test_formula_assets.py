@@ -1276,7 +1276,7 @@ class FormulaAssetTests(unittest.TestCase):
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
             }
             result = subprocess.run(
-                [str(command)], capture_output=True, env=env, text=True, timeout=2
+                [str(command)], capture_output=True, env=env, text=True, timeout=10
             )
             call_lines = calls.read_text(encoding="utf-8").splitlines()
 

@@ -122,14 +122,29 @@ queue.
    Aggregate failures create parallel fix-forward work, land as a repair PR,
    and restart verification from the new merged SHA.
 5. Only a verified SHA may advance the stable release ref. The terminal
-   `promoted` transition atomically closes the epoch's sealed source beads.
+   `promoted` transition closes each sealed source only when its epoch
+   provenance and exact close reason agree; a concurrent external close fails
+   the promotion closed.
 
 Candidate states are `queued -> frozen -> landed -> verified`, with
 `superseded` and `rejected` as explicit terminal alternatives. Epochs normally
 move through `assembling -> landed -> verifying -> verified -> promoting ->
-promoted`; failures use typed `red`, `repairing`, `promotion_failed`, `failed`,
-or `cancelled` states. Every transition appends bounded evidence to the bead
-metadata and emits a low-cardinality `thunderdome.transition` event.
+promotion_committing -> promoted`; failures use typed `red`, `repairing`,
+`promotion_failed`, `failed`, or `cancelled` states. The sealed
+`promotion_committing` state prevents failure transitions from racing source
+closure. Every transition appends bounded evidence to the bead metadata and
+durably appends a low-cardinality `thunderdome.transition` event before
+advancing its retry marker. Event delivery is at-least-once across crash replay.
+
+Legacy records without the authoritative envelope fail closed during normal
+operation. Migrate them only while all legacy Thunderdome writers are stopped:
+
+```sh
+GC_THUNDERDOME_ALLOW_LEGACY_MIGRATION=1 \
+  gc gc thunderdome --rig <rig> migrate --json
+```
+
+The explicit gate is a one-time cutover fence, not a persistent runtime setting.
 
 Launch a delivery-unit build from a convoy:
 
@@ -147,7 +162,10 @@ gc gc thunderdome --rig <rig> status \
   --fail-on-violation
 ```
 
-Run the bounded trigger manually or from a cooldown order:
+The deployed `thunderdome-sprocket` order makes this bounded trigger due after
+a one-minute city-scoped cooldown. The controller's ordinary tracking gate
+prevents overlapping executions. Run the same command directly when reconciling
+manually:
 
 ```sh
 gc gc thunderdome --rig <rig> reconcile \
