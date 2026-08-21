@@ -307,6 +307,10 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
 
         self.assertIn("{{full_gate_command}}", assemble)
         self.assertIn("Do not substitute, widen, split, or infer another gate.", assemble)
+        self.assertLess(
+            assemble.index("For candidates in the sealed order"),
+            assemble.index("{{full_gate_command}}"),
+        )
         self.assertIn("deliberately never reaches", assemble)
         self.assertIn(
             'git push --force-with-lease="refs/heads/thunderdome/epoch-<epoch-id>:"',
