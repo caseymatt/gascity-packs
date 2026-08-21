@@ -14,6 +14,7 @@ FORMULA = ROOT / "formulas" / "thunderdome-land.formula.toml"
 PROMPT = ROOT / "assets" / "workflows" / "thunderdome-land" / "cleanup.md"
 ASSEMBLE_PROMPT = ROOT / "assets" / "workflows" / "thunderdome-land" / "assemble-land.md"
 VERIFY_PROMPT = ROOT / "assets" / "workflows" / "thunderdome-land" / "verify-repair.md"
+PROMOTE_PROMPT = ROOT / "assets" / "workflows" / "thunderdome-land" / "promote.md"
 ITEM_PROMPT = (
     ROOT
     / "assets"
@@ -317,6 +318,13 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
             assemble,
         )
         self.assertIn("never pass `published_ref` to `gh`", assemble)
+
+    def test_promote_uses_checked_fallback_without_private_ref_protection(self) -> None:
+        promote = PROMOTE_PROMPT.read_text(encoding="utf-8")
+
+        self.assertIn("Missing protection capability alone is not a failure", promote)
+        self.assertIn("complete configured check rollup", promote)
+        self.assertIn("normal fast-forward push; never force", promote)
 
     def test_land_builds_use_registered_unique_target_and_publication(self) -> None:
         assemble = ASSEMBLE_PROMPT.read_text(encoding="utf-8")

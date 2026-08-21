@@ -9,12 +9,21 @@ Resolve the epoch through the workflow root and require:
 - every sealed candidate has `gc.thunderdome.state=verified`
 - `git fetch --no-tags origin "{{target_ref}}"` resolves `FETCH_HEAD` to that exact SHA
 
+Require protection on `{{release_ref}}` when the provider/account exposes it.
+When the provider cannot protect a private release ref, use the equivalent
+fail-closed path: require the aggregate PR's complete configured check rollup
+green, re-read `{{target_ref}}` at the exact verified SHA, and record the
+unavailable protection capability in the promotion artifact before mutation.
+Missing protection capability alone is not a failure when all fallback evidence
+is present.
+
 Fetch the validated full release ref with
-`git fetch --no-tags origin "{{release_ref}}"`. Update it atomically to the exact
+`git fetch --no-tags origin "{{release_ref}}"`. If it exists, require its exact
+SHA to be an ancestor of the verified SHA. Update it atomically to the exact
 verified SHA with a normal fast-forward push; never force. If it does not exist,
-create it at that SHA. A concurrent update, non-fast-forward result, missing
-protection, or ambiguous remote response is a hard failure. Read the remote ref
-back and require exact equality.
+create it at that SHA. A concurrent update, non-fast-forward result, failed
+configured check, or ambiguous remote response is a hard failure. Read the
+remote ref back and require exact equality.
 
 Transition the epoch from `verified` to `promoting` through the installed
 adapter. Write a sanitized promotion artifact containing epoch ID, candidate
