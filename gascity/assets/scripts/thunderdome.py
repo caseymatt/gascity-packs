@@ -2277,12 +2277,12 @@ def repair_ledger(
                     raise
         elif state in {"frozen", "landed", "verified"}:
             epoch = by_id.get(str(metadata.get(PREFIX + "epoch_id", "")))
-            if (
-                state == "verified"
-                and epoch is not None
-                and record_metadata(epoch).get(STATE) == "promoted"
-            ):
-                continue
+            if state == "verified" and epoch is not None:
+                epoch_state = record_metadata(epoch).get(STATE)
+                if epoch_state in TERMINAL_EPOCH_STATES:
+                    if epoch_state in ABANDONED_EPOCH_STATES:
+                        _release_owned_reservations(client, candidate_id, sources)
+                    continue
             _ensure_epoch_source_reservations(
                 client,
                 candidate_id,

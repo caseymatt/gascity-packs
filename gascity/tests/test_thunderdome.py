@@ -1686,6 +1686,39 @@ class RecoveryProtocolTests(unittest.TestCase):
             "",
         )
 
+    def test_abandoned_verified_candidate_does_not_reclaim_retry_reservation(
+        self,
+    ) -> None:
+        self.add_source("sp-source-a")
+        first = self.enqueue(["sp-source-a"], delivery="first")
+        epoch = self.open_epoch([str(first["id"])])
+        epoch_id = str(epoch["id"])
+        self.transition(epoch_id, "landed", landed_sha=LANDED_SHA)
+        self.transition(epoch_id, "verifying")
+        self.transition(
+            epoch_id,
+            "verified",
+            verified_sha=LANDED_SHA,
+            verification_ref="artifact://gate",
+        )
+        self.transition(
+            epoch_id,
+            "failed",
+            failure_class="policy",
+            evidence_ref="artifact://promotion-failure",
+        )
+        retry = self.enqueue(["sp-source-a"], delivery="retry")
+
+        result = self.module.reconcile(self.client, self.reconcile_args(dry_run=True))
+
+        self.assertEqual(result["action"], "would_dispatch")
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"][
+                self.module.CANDIDATE_ID
+            ],
+            retry["id"],
+        )
+
 
     def test_transition_replay_marks_event_once_and_closes_sources_once(self) -> None:
         self.add_source("sp-source-a")
