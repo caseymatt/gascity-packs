@@ -58,19 +58,35 @@ gc worktree publish "thunderdome-epoch-<epoch-id>" --json
 
 Require returned `published_sha` to equal the checkout's current exact `HEAD`.
 Persist and read back `gc.thunderdome.published_ref=<published_ref>` and
-`gc.thunderdome.published_sha=<published_sha>` as teardown evidence. This is the
-only permitted publication operation; never invoke `git push` directly. Derive
-the GitHub PR base branch by removing the validated `refs/heads/` prefix from
-`{{target_ref}}`; never pass a full ref where the GitHub API requires a branch
-name. Open exactly one aggregate PR from the controlled `published_ref` and
-wait on GitHub's check/event surface rather than a sleep loop. Use branch
-protection and the merge queue when the repository exposes them.
+`gc.thunderdome.published_sha=<published_sha>` as teardown evidence. The
+Code Storage ref is durable recovery evidence but deliberately never reaches
+GitHub; never pass `published_ref` to `gh`.
+
+Publish the exact durable SHA to the unique GitHub integration ref
+`refs/heads/thunderdome/epoch-<epoch-id>`. First read that full ref with
+`git ls-remote --refs origin`. If it is absent, create it with the
+absence-guarded command below. If it already exists, require it to resolve to
+exactly `published_sha`; any other value is a hard failure.
+
+```bash
+git push --force-with-lease="refs/heads/thunderdome/epoch-<epoch-id>:" \
+  origin "<published-sha>:refs/heads/thunderdome/epoch-<epoch-id>"
+```
+
+Read the remote ref back and require one exact `<published_sha>` match. Derive
+the GitHub PR head and base branch names by removing the validated
+`refs/heads/` prefixes from the integration ref and `{{target_ref}}`; never pass
+a full ref where the GitHub API requires a branch name. Open exactly one
+aggregate PR from the GitHub integration branch and wait on GitHub's
+check/event surface rather than a sleep loop. Use branch protection and the
+merge queue when the repository exposes them.
 
 When the provider or account cannot protect this private branch, use the
 equivalent fail-closed path: require every configured PR check green, re-read
 the exact base and candidate head SHAs immediately before merge, and merge with
 `gh pr merge --match-head-commit <candidate-head-sha>`. Record the unavailable
-protection capability and all check/merge evidence. Never push directly to the
+protection capability and all check/merge evidence. Outside the exact
+absence-guarded integration-ref command above, never push directly to the
 target, force push, merge a changed head, or treat missing checks as success.
 On any preflight, publication, check, or merge failure, write a sanitized
 artifact, transition the epoch to `failed` with `failure_class` and

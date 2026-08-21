@@ -307,6 +307,12 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
 
         self.assertIn("{{full_gate_command}}", assemble)
         self.assertIn("Do not substitute, widen, split, or infer another gate.", assemble)
+        self.assertIn("deliberately never reaches", assemble)
+        self.assertIn(
+            'git push --force-with-lease="refs/heads/thunderdome/epoch-<epoch-id>:"',
+            assemble,
+        )
+        self.assertIn("never pass `published_ref` to `gh`", assemble)
 
     def test_land_builds_use_registered_unique_target_and_publication(self) -> None:
         assemble = ASSEMBLE_PROMPT.read_text(encoding="utf-8")
