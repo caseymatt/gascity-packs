@@ -2514,7 +2514,7 @@ def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def migrate_legacy_records(client: BeadClient) -> dict[str, Any]:
-    migrated: list[str] = []
+    migrated: set[str] = set()
     for record in client.list_thunderdome():
         metadata = record_metadata(record)
         if metadata.get(KIND) not in {"candidate", "epoch"}:
@@ -2523,13 +2523,68 @@ def migrate_legacy_records(client: BeadClient) -> dict[str, Any]:
             continue
         bead_id = str(record.get("id", ""))
         client.authoritative_reread(bead_id)
-        migrated.append(bead_id)
+        migrated.add(bead_id)
+
+    records = client.list_thunderdome()
+    by_id = {str(record.get("id", "")): record for record in records}
+    for epoch in records:
+        epoch_metadata = record_metadata(epoch)
+        if epoch_metadata.get(KIND) != "epoch" or epoch_metadata.get(STATE) != "promoted":
+            continue
+        epoch_id = str(epoch.get("id", ""))
+        release_sha = str(epoch_metadata.get(PREFIX + "release_sha", ""))
+        expected_close_reason = (
+            f"Verified in Thunderdome epoch {epoch_id} at {release_sha}"
+        )
+        for candidate_id in epoch_metadata.get(PREFIX + "candidate_ids", []):
+            candidate = by_id.get(str(candidate_id))
+            if candidate is None:
+                raise StateError(
+                    f"promoted epoch {epoch_id} references missing candidate {candidate_id}"
+                )
+            candidate_metadata = record_metadata(candidate)
+            if (
+                candidate_metadata.get(STATE) != "verified"
+                or candidate_metadata.get(PREFIX + "epoch_id") != epoch_id
+            ):
+                raise StateError(
+                    f"promoted epoch {epoch_id} has inconsistent candidate {candidate_id}"
+                )
+            for source_id in candidate_metadata.get(PREFIX + "source_beads", []):
+                sources = client.show([str(source_id)])
+                if not sources:
+                    raise StateError(f"promoted source bead {source_id} is missing")
+                source = sources[0]
+                provenance = raw_metadata(source).get(PROMOTED_BY, "")
+                if provenance == epoch_id:
+                    continue
+                if (
+                    provenance != ""
+                    or str(source.get("status", "")) != "closed"
+                    or str(source.get("close_reason", "")) != expected_close_reason
+                ):
+                    raise StateError(
+                        f"source bead {source_id} cannot prove promotion by epoch {epoch_id}"
+                    )
+                if not client.metadata_cas(
+                    str(source_id), PROMOTED_BY, "", epoch_id
+                ):
+                    sources = client.show([str(source_id)])
+                    if not sources:
+                        raise StateError(f"promoted source bead {source_id} is missing")
+                    source = sources[0]
+                    if raw_metadata(source).get(PROMOTED_BY, "") != epoch_id:
+                        raise StateError(
+                            f"source bead {source_id} promotion provenance changed concurrently"
+                        )
+                migrated.add(str(source_id))
+    migrated_ids = sorted(migrated)
     return {
         "schema_version": "1",
         "ok": True,
         "action": "migrated",
-        "migrated_ids": sorted(migrated),
-        "migrated_count": len(migrated),
+        "migrated_ids": migrated_ids,
+        "migrated_count": len(migrated_ids),
     }
 
 

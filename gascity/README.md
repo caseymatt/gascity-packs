@@ -137,7 +137,9 @@ durably appends a low-cardinality `thunderdome.transition` event before
 advancing its retry marker. Event delivery is at-least-once across crash replay.
 
 Legacy records without the authoritative envelope fail closed during normal
-operation. Migrate them only while all legacy Thunderdome writers are stopped:
+operation. The migration also backfills missing promoted-source provenance only
+when the source is closed with the exact epoch-and-release close reason. Migrate
+only while all legacy Thunderdome writers are stopped:
 
 ```sh
 GC_THUNDERDOME_ALLOW_LEGACY_MIGRATION=1 \

@@ -2108,6 +2108,52 @@ class RecoveryProtocolTests(unittest.TestCase):
             self.module.RECORD, self.runner.records[candidate_id]["metadata"]
         )
 
+    def test_legacy_migration_restores_provenance_for_promoted_sources(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        candidate_id = str(candidate["id"])
+        epoch = self.open_epoch([candidate_id])
+        epoch_id = str(epoch["id"])
+        self.transition(epoch_id, "landed", landed_sha=LANDED_SHA)
+        self.transition(epoch_id, "verifying")
+        self.transition(
+            epoch_id,
+            "verified",
+            verified_sha=LANDED_SHA,
+            verification_ref="artifact://gate",
+        )
+        self.transition(epoch_id, "promoting")
+        self.transition(
+            epoch_id,
+            "promoted",
+            release_sha=LANDED_SHA,
+            release_ref="refs/heads/release/stable",
+        )
+        candidate_metadata = self.module.record_metadata(
+            self.client.authoritative_reread(candidate_id)
+        )
+        epoch_metadata = self.module.record_metadata(
+            self.client.authoritative_reread(epoch_id)
+        )
+        self.runner.records[candidate_id]["metadata"] = candidate_metadata
+        self.runner.records[epoch_id]["metadata"] = epoch_metadata
+        source = self.runner.records["sp-source-a"]
+        del source["metadata"][self.module.PROMOTED_BY]
+        self.allow_legacy_migration()
+
+        result = self.module.migrate_legacy_records(self.client)
+
+        self.assertEqual(
+            result["migrated_ids"],
+            sorted([candidate_id, epoch_id, "sp-source-a"]),
+        )
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"][
+                self.module.PROMOTED_BY
+            ],
+            epoch_id,
+        )
+
     def test_reconcile_dry_run_reports_repair_without_mutation(self) -> None:
         self.add_source("sp-source-a")
         metadata = self.module.new_candidate_metadata(
