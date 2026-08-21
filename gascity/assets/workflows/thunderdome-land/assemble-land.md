@@ -26,9 +26,14 @@ Require the returned `id`, `owner`, `rig`, `rig_root`, `path`, `attempt`,
 is reusable only when every field matches; otherwise fail closed. Persist
 `gc.worktree.id`, canonical `gc.worktree.path`, legacy `gc.work_dir`,
 `gc.cargo_target_dir`, and `gc.cargo_home` on the workflow root and read them
-back. Run every formatting, compilation, schema/migration preflight, and
-fast-test command from the returned `path` with the returned cache environment
-passed explicitly and unchanged.
+back. From the returned `path`, run the sealed repository preflight exactly:
+
+```bash
+{{full_gate_command}}
+```
+
+Pass the returned cache environment explicitly and unchanged to that command.
+Do not substitute, widen, split, or infer another gate.
 Require `cargo_target_dir` to equal
 `$GC_RIG_ROOT/worktrees/.cargo-targets/thunderdome-epoch-<epoch-id>/attempt-1`
 and `cargo_home` to equal `$GC_RIG_ROOT/.gc/cache/cargo-home`. The launcher

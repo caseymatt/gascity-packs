@@ -302,6 +302,12 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
             verify,
         )
 
+    def test_assemble_runs_the_sealed_full_gate_command_exactly(self) -> None:
+        assemble = ASSEMBLE_PROMPT.read_text(encoding="utf-8")
+
+        self.assertIn("{{full_gate_command}}", assemble)
+        self.assertIn("Do not substitute, widen, split, or infer another gate.", assemble)
+
     def test_land_builds_use_registered_unique_target_and_publication(self) -> None:
         assemble = ASSEMBLE_PROMPT.read_text(encoding="utf-8")
         verify = VERIFY_PROMPT.read_text(encoding="utf-8")
