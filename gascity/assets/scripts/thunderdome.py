@@ -34,6 +34,13 @@ PROMOTED_BY = PREFIX + "promoted_by"
 EMITTED_SEQ = PREFIX + "emitted_seq"
 DISPATCH_INTENT = PREFIX + "dispatch_intent"
 MAX_HISTORY = 64
+COMMAND_DIAGNOSTIC_LIMIT = 512
+COMMAND_DIAGNOSTIC_SCAN_LIMIT = COMMAND_DIAGNOSTIC_LIMIT * 8
+SENSITIVE_DIAGNOSTIC_PATTERN = re.compile(
+    r"(?i)\b(authorization\s*:\s*(?:bearer|basic)\s+|"
+    r"(?:token|password|passwd|secret|api[_-]?key)\s*[=:]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|\S+)"
+)
 CANDIDATE_STATES = {"queued", "frozen", "landed", "verified", "superseded", "rejected"}
 EPOCH_STATES = {
     "assembling",
@@ -870,6 +877,33 @@ def subprocess_runner(args: Sequence[str], env: Mapping[str, str]) -> subprocess
     return subprocess.run(args, capture_output=True, text=True, env=dict(env), check=False)
 
 
+def _command_diagnostic(
+    stream: str | None,
+    *,
+    env: Mapping[str, str],
+) -> str:
+    raw = (stream or "")[:COMMAND_DIAGNOSTIC_SCAN_LIMIT]
+    environment_values = sorted(
+        {value for value in env.values() if value},
+        key=len,
+        reverse=True,
+    )
+    long_values = [re.escape(value) for value in environment_values if len(value) >= 4]
+    short_values = [re.escape(value) for value in environment_values if len(value) < 4]
+    alternatives = long_values
+    if short_values:
+        alternatives.append(r"(?<!\w)(?:" + "|".join(short_values) + r")(?!\w)")
+    sanitized = (
+        re.sub("|".join(alternatives), "[redacted]", raw) if alternatives else raw
+    )
+    sanitized = SENSITIVE_DIAGNOSTIC_PATTERN.sub(r"\1[redacted]", sanitized)
+    concise = " ".join(sanitized.split())
+    if len(concise) <= COMMAND_DIAGNOSTIC_LIMIT:
+        return concise
+    suffix = "…[truncated]"
+    return concise[: COMMAND_DIAGNOSTIC_LIMIT - len(suffix)] + suffix
+
+
 class BeadClient:
     def __init__(
         self,
@@ -904,8 +938,15 @@ class BeadClient:
         completed = self._runner([*self._prefix(), *args], env)
         if completed.returncode != 0:
             operation = " ".join(args[:2])
+            stream_name, diagnostic = (
+                ("stderr", completed.stderr)
+                if (completed.stderr or "").strip()
+                else ("stdout", completed.stdout)
+            )
+            detail = _command_diagnostic(diagnostic, env=env) or "<no output>"
             raise CommandError(
-                f"gc {operation} failed with exit {completed.returncode}; inspect command diagnostics locally"
+                f"gc {operation} failed with exit {completed.returncode}; "
+                f"{stream_name}: {detail}"
             )
         if not expect_json:
             return completed.stdout

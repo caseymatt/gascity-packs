@@ -734,7 +734,7 @@ class DeployedOrderContractTests(unittest.TestCase):
                     "trigger": "cooldown",
                     "interval": "1m",
                     "scope": "city",
-                    "timeout": "60s",
+                    "timeout": "300s",
                     "idempotent": False,
                     "no_work_gate": False,
                     "exec": (
@@ -2339,7 +2339,7 @@ class AdapterTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def test_client_scopes_commands_and_redacts_subprocess_output(self) -> None:
+    def test_client_failure_prefers_sanitized_stderr(self) -> None:
         calls: list[list[str]] = []
         envs: list[dict[str, str]] = []
 
@@ -2349,8 +2349,8 @@ class AdapterTests(unittest.TestCase):
             return subprocess.CompletedProcess(
                 args,
                 17,
-                stdout="",
-                stderr="Authorization: Bearer private-token",
+                stdout="less useful stdout",
+                stderr="Authorization: Bearer private-token\nrecord update rejected",
             )
 
         client = self.module.BeadClient(
@@ -2373,6 +2373,45 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("exit 17", str(raised.exception))
         self.assertNotIn("BD_IGNORE_SCHEMA_SKEW", envs[0])
         self.assertEqual(envs[1]["BD_IGNORE_SCHEMA_SKEW"], "caller-owned")
+        message = str(raised.exception)
+        self.assertIn("gc bd list failed with exit 17", message)
+        self.assertIn("stderr: Authorization: Bearer [redacted] record update rejected", message)
+        self.assertNotIn("less useful stdout", message)
+
+    def test_client_failure_falls_back_to_sanitized_stdout(self) -> None:
+        def runner(args, _env):
+            return subprocess.CompletedProcess(
+                args,
+                23,
+                stdout="worker failed for env-value",
+                stderr=" \n",
+            )
+
+        client = self.module.BeadClient(runner=runner)
+        with mock.patch.dict(os.environ, {"WORKER_CONTEXT": "env-value"}, clear=True):
+            with self.assertRaises(self.module.CommandError) as raised:
+                client.run(["bd", "show", "sp-candidate"])
+
+        message = str(raised.exception)
+        self.assertIn("gc bd show failed with exit 23", message)
+        self.assertIn("stdout: worker failed for [redacted]", message)
+        self.assertNotIn("env-value", message)
+
+    def test_client_failure_truncates_diagnostics_to_explicit_bound(self) -> None:
+        diagnostic = "x" * (self.module.COMMAND_DIAGNOSTIC_LIMIT + 100)
+
+        def runner(args, _env):
+            return subprocess.CompletedProcess(args, 9, stdout="", stderr=diagnostic)
+
+        client = self.module.BeadClient(runner=runner)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(self.module.CommandError) as raised:
+                client.run(["bd", "update", "sp-candidate"])
+
+        detail = str(raised.exception).partition("stderr: ")[2]
+        self.assertEqual(len(detail), self.module.COMMAND_DIAGNOSTIC_LIMIT)
+        self.assertTrue(detail.endswith("…[truncated]"))
+        self.assertNotIn("inspect command diagnostics locally", str(raised.exception))
 
     def test_client_decodes_structured_metadata_strings_and_rejects_malformed_values(self) -> None:
         candidate = self.module.new_candidate_metadata(
