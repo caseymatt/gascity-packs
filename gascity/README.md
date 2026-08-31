@@ -110,10 +110,13 @@ queue.
    repository-owned aggregate Rust gate exactly once before summary, review,
    and recording one immutable `queued` candidate. It does not push, open a PR,
    or close source beads.
-2. `gc gc thunderdome reconcile` selects a bounded set of candidates only when
-   queue depth or oldest-candidate age is due. It freezes that exact membership
-   into one epoch and dispatches `thunderdome-land`. An active epoch prevents a
-   second dispatch.
+2. `gc gc thunderdome reconcile` first ingests closed, reviewed
+   `thunderdome-build` workflow roots through an idempotent metadata CAS. It
+   refreshes stale candidates from the current trunk and checks the linked
+   landing workflow for terminal failure or bounded liveness timeout. It then
+   selects a bounded set only when queue depth or oldest-candidate age is due,
+   freezes that exact membership into one epoch, and dispatches
+   `thunderdome-land`. An active healthy epoch prevents a second dispatch.
 3. `thunderdome-land` merges every frozen candidate into one aggregate branch
    and protected PR. Where the provider cannot protect a private branch, it
    requires the equivalent fail-closed path: all configured checks green and a
@@ -179,15 +182,21 @@ gc gc thunderdome --rig <rig> reconcile \
   --json
 ```
 
-Use `--dry-run` to inspect the trigger decision. Reconcile fails closed when
-the projection reports an invariant violation, excludes candidates whose base
-does not equal current trunk, and resumes an assembling epoch when dispatch
-failed before its workflow ID was recorded.
+Use `--dry-run` to inspect the next priority action without mutating state.
+Reconcile fails closed when the projection reports an invariant violation.
+Priority is repair, reviewed-build ingress, terminal or stale-candidate
+recovery, failed/cancelled epoch cleanup, then bounded epoch dispatch. A stale
+candidate is released, marked `superseded`, and rebuilt once from the exact
+current trunk. A terminal or timed-out linked workflow fails its epoch,
+releases the sealed candidates for rebuild, and records sanitized evidence.
 
 For rollback, disable the reconcile order first. Let an active epoch reach a
-typed terminal state; do not delete candidate or epoch beads. A failed or
-cancelled epoch remains queryable evidence, and queued candidates remain open
-until explicitly refreshed, superseded, or rejected.
+typed terminal state; do not delete candidate or epoch beads. Failed and
+cancelled epochs remain queryable. After the configured cleanup grace period,
+reconcile dispatches the internal `thunderdome-cleanup` workflow exactly once.
+That janitor reclaims only exact lifecycle registry IDs accepted by
+`gc worktree reclaim`; dirty, unpushed, unpublished, conflicting, or otherwise
+ambiguous resources remain registered with a typed preservation reason.
 
 ## Launch variables that matter
 
