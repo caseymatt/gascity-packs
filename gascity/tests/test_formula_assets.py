@@ -867,6 +867,42 @@ class FormulaAssetTests(unittest.TestCase):
             },
         )
 
+    def test_city_claim_command_prefers_session_id_over_pool_name(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        command = root / "commands" / "claim" / "run.sh"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            fake_gc = bin_dir / "gc"
+            fake_gc.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = hook ] && [ \"$2\" = --claim ]; then\n"
+                "  printf '%s\\n' '{\"action\":\"work\",\"bead_id\":\"bd-123\",\"assignee\":\"session-1\",\"route\":\"gc.run-operator\"}'\n"
+                "elif [ \"$1\" = bd ] && [ \"$2\" = show ] && [ \"$3\" = bd-123 ]; then\n"
+                "  printf '%s\\n' '{\"id\":\"bd-123\",\"status\":\"in_progress\",\"assignee\":\"session-1\",\"metadata\":{\"gc.routed_to\":\"gc.run-operator\"}}'\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_gc.chmod(0o755)
+            env = {
+                **os.environ,
+                "GC_AGENT": "gc.run-operator",
+                "GC_SESSION_ID": "session-1",
+                "GC_SESSION_NAME": "sprocket--gc__run-operator-8-pool",
+                "GC_PACK_DIR": str(root),
+                "GC_PACK_NAME": "gc",
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+            }
+            env.pop("BEADS_ACTOR", None)
+            result = subprocess.run([str(command)], capture_output=True, env=env, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["bead"]["assignee"], "session-1")
+
     def test_city_claim_command_returns_drain_without_bead_lookup(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
         command = root / "commands" / "claim" / "run.sh"
