@@ -170,6 +170,7 @@ this ledger against the `FORMULAS` constant and formula directory.
 | GC-BF-035 | `thunderdome-work-item` | Targeted candidate item helper | Implements one source bead in an isolated worktree, produces validated commit evidence, and leaves the source open until verified stable promotion. | `thunderdome-work-item.formula.toml`; `../tests/test_thunderdome.py` |
 | GC-BF-036 | `thunderdome-build` | Cataloged candidate builder | Drains one delivery unit in parallel, integrates every item commit, writes validated summary and review artifacts, enqueues one immutable candidate, and neither publishes nor closes source beads. | `thunderdome-build.formula.toml`; `../tests/test_thunderdome.py` |
 | GC-BF-037 | `thunderdome-land` | Cataloged epoch orchestrator | Freezes sealed candidate membership, lands one aggregate protected PR, verifies actual trunk, fans aggregate failures into fix-forward work, promotes an exact verified release ref, and only then closes sources. | `thunderdome-land.formula.toml`; `../tests/test_thunderdome.py` |
+| GC-BF-038 | `thunderdome-cleanup` | Targeted internal terminal-epoch janitor | Reclaims only exact lifecycle-registered worktrees after a failed or cancelled epoch's grace period, preserves every resource rejected by registry safety checks, and records a typed cleanup report. | `thunderdome-cleanup.formula.toml`; `../assets/workflows/thunderdome-cleanup/cleanup.md`; `../tests/test_thunderdome.py` |
 
 ### Review And Fix Utilities
 

@@ -1,0 +1,28 @@
+description = """
+Revisit one failed or cancelled Continuous Thunderdome epoch after its cleanup
+grace period. Reclaim only lifecycle-registered worktrees whose registry safety
+checks pass; preserve every ambiguous resource with typed evidence.
+
+Launch input:
+- terminal epoch: {{epoch_id}}
+"""
+formula = "thunderdome-cleanup"
+version = 1
+target_required = true
+sling_container_mode = "source"
+internal = true
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+
+[vars]
+[vars.epoch_id]
+description = "Exact terminal Thunderdome epoch bead ID."
+required = true
+
+[[steps]]
+id = "cleanup"
+title = "Reclaim deferred terminal epoch resources"
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/thunderdome-cleanup/cleanup.md"

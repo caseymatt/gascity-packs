@@ -33,6 +33,14 @@ ACTIVE_EPOCH = PREFIX + "active_epoch"
 PROMOTED_BY = PREFIX + "promoted_by"
 EMITTED_SEQ = PREFIX + "emitted_seq"
 DISPATCH_INTENT = PREFIX + "dispatch_intent"
+INGRESS_STATE = PREFIX + "ingress_state"
+INGRESS_REVIEWED = "reviewed"
+INGRESS_QUEUED = "queued"
+INGRESS_CANDIDATE_ID = PREFIX + "candidate_id"
+REFRESH_INTENT = PREFIX + "refresh_intent"
+REFRESH_WORKFLOW_ID = PREFIX + "refresh_workflow_id"
+CLEANUP_INTENT = PREFIX + "cleanup_intent"
+CLEANUP_WORKFLOW_ID = PREFIX + "cleanup_workflow_id"
 MAX_HISTORY = 64
 COMMAND_DIAGNOSTIC_LIMIT = 512
 COMMAND_DIAGNOSTIC_SCAN_LIMIT = COMMAND_DIAGNOSTIC_LIMIT * 8
@@ -973,6 +981,29 @@ class BeadClient:
             raise CommandError("gc bd list returned a non-array result")
         return [decode_thunderdome_record(record) for record in result]
 
+    def list_metadata(self, key: str, value: str) -> list[dict[str, Any]]:
+        result = self.run(
+            [
+                "bd",
+                "list",
+                "--status",
+                "open,in_progress,blocked,deferred,closed",
+                "--metadata-field",
+                f"{key}={value}",
+                "--limit",
+                "0",
+                "--json",
+            ]
+        )
+        if not isinstance(result, list):
+            raise CommandError("gc bd list returned a non-array result")
+        records = [decode_thunderdome_record(record) for record in result]
+        return [
+            record
+            for record in records
+            if raw_metadata(record).get(key) == value
+        ]
+
     def show(self, bead_ids: Sequence[str]) -> list[dict[str, Any]]:
         if not bead_ids:
             return []
@@ -1365,6 +1396,110 @@ def enqueue_candidate(client: BeadClient, args: argparse.Namespace) -> dict[str,
             reason=f"Thunderdome candidate converged in terminal state {state}",
         )
     return candidate
+
+
+def _metadata_text(metadata: Mapping[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = metadata.get(key, "")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _converge_metadata_value(
+    client: BeadClient, bead_id: str, key: str, expected: str, value: str
+) -> None:
+    if expected == value:
+        return
+    if client.metadata_cas(bead_id, key, expected, value):
+        return
+    records = client.show([bead_id])
+    current = raw_metadata(records[0]).get(key, "") if records else ""
+    if current != value:
+        raise StateError(f"metadata {key} on {bead_id} did not converge")
+
+
+def ingest_reviewed_candidate(
+    client: BeadClient, workflow: Mapping[str, Any], *, now: str
+) -> dict[str, Any]:
+    workflow_id = str(workflow.get("id", ""))
+    metadata = record_metadata(workflow)
+    if metadata.get(INGRESS_STATE) != INGRESS_REVIEWED:
+        raise StateError(f"workflow {workflow_id} is not a reviewed Thunderdome ingress")
+    commit = _metadata_text(metadata, PREFIX + "commit")
+    validation_commit = _metadata_text(metadata, PREFIX + "validation_commit")
+    if commit != validation_commit:
+        raise StateError(
+            f"workflow {workflow_id} candidate and validation commits do not match"
+        )
+    lifecycle_id = _metadata_text(metadata, "gc.worktree.id")
+    lifecycle_owner = _metadata_text(metadata, "gc.worktree.owner")
+    if not lifecycle_id or lifecycle_owner != workflow_id:
+        raise StateError(f"workflow {workflow_id} has invalid worktree lifecycle identity")
+    candidate = enqueue_candidate(
+        client,
+        argparse.Namespace(
+            source_bead=metadata.get(PREFIX + "source_beads", []),
+            delivery_unit=_metadata_text(metadata, PREFIX + "delivery_unit"),
+            commit=commit,
+            base_sha=_metadata_text(metadata, PREFIX + "base_sha"),
+            summary_path=_metadata_text(
+                metadata,
+                PREFIX + "summary_path",
+                "gc.implementation.summary_path",
+                "gc.build.implementation_summary_path",
+            ),
+            review_path=_metadata_text(
+                metadata,
+                PREFIX + "review_path",
+                "gc.build.review_report_path",
+            ),
+            now=now,
+        ),
+    )
+    candidate_id = str(candidate["id"])
+    candidate_raw = raw_metadata(candidate)
+    _converge_metadata_value(
+        client,
+        candidate_id,
+        "gc.worktree.id",
+        str(candidate_raw.get("gc.worktree.id", "")),
+        lifecycle_id,
+    )
+    candidate = client.authoritative_reread(candidate_id)
+    candidate_raw = raw_metadata(candidate)
+    _converge_metadata_value(
+        client,
+        candidate_id,
+        "gc.worktree.owner",
+        str(candidate_raw.get("gc.worktree.owner", "")),
+        lifecycle_owner,
+    )
+    workflow_raw = raw_metadata(workflow)
+    _converge_metadata_value(
+        client,
+        workflow_id,
+        INGRESS_CANDIDATE_ID,
+        str(workflow_raw.get(INGRESS_CANDIDATE_ID, "")),
+        candidate_id,
+    )
+    _converge_metadata_value(
+        client,
+        workflow_id,
+        INGRESS_STATE,
+        INGRESS_REVIEWED,
+        INGRESS_QUEUED,
+    )
+    return client.authoritative_reread(candidate_id)
+
+
+def ingest_reviewed_candidates(
+    client: BeadClient, *, now: str
+) -> list[dict[str, Any]]:
+    return [
+        ingest_reviewed_candidate(client, workflow, now=now)
+        for workflow in client.list_metadata(INGRESS_STATE, INGRESS_REVIEWED)
+    ]
 
 
 def _control_for(
@@ -2144,6 +2279,493 @@ def _dispatch_epoch(client: BeadClient, args: argparse.Namespace, epoch: Mapping
     }
 
 
+def _target_branch(target_ref: str) -> str:
+    exact_ref = require_ref("target_ref", target_ref)
+    prefix = "refs/heads/"
+    if not exact_ref.startswith(prefix):
+        raise StateError("candidate refresh requires a refs/heads/* target")
+    return exact_ref[len(prefix) :]
+
+
+def _refresh_formula_digest(
+    client: BeadClient, args: argparse.Namespace, metadata: Mapping[str, Any]
+) -> str:
+    result = client.run(
+        [
+            "formula",
+            "show",
+            "thunderdome-build",
+            "--var",
+            f"target_ref={_target_branch(args.target_ref)}",
+            "--var",
+            f"aggregate_rust_gate_command={args.full_gate_command}",
+            "--json",
+        ]
+    )
+    if not isinstance(result, Mapping):
+        raise CommandError("gc formula show returned an invalid response")
+    fingerprint = str(result.get("compiled_fingerprint", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise CommandError("gc formula show returned no compiled fingerprint")
+    return fingerprint
+
+
+def _seal_refresh_intent(
+    client: BeadClient,
+    candidate_id: str,
+    args: argparse.Namespace,
+    *,
+    trunk_sha: str,
+) -> dict[str, Any]:
+    for _ in range(16):
+        candidate = client.authoritative_reread(candidate_id)
+        metadata = record_metadata(candidate)
+        existing = metadata.get(REFRESH_INTENT)
+        if existing is not None:
+            if not isinstance(existing, Mapping):
+                raise StateError(
+                    f"candidate {candidate_id} has an invalid refresh intent"
+                )
+            return candidate
+        operator = args.operator if "/" in args.operator else f"{args.rig}/{args.operator}"
+        intent = {
+            "schema_version": "1",
+            "formula": "thunderdome-build",
+            "formula_digest": _refresh_formula_digest(client, args, metadata),
+            "operator": operator,
+            "rig": str(args.rig),
+            "delivery_unit": _metadata_text(metadata, PREFIX + "delivery_unit"),
+            "stale_candidate_id": candidate_id,
+            "stale_base_sha": require_sha(
+                "base_sha", _metadata_text(metadata, PREFIX + "base_sha")
+            ),
+            "refresh_base_sha": require_sha("trunk_sha", trunk_sha),
+            "target_ref": require_ref("target_ref", args.target_ref),
+            "full_gate_command": str(args.full_gate_command),
+        }
+        updated = dict(metadata)
+        updated[REFRESH_INTENT] = intent
+        swapped = client.cas_envelope(candidate, updated)
+        if swapped is not None:
+            return swapped
+    raise StateError(f"refresh intent for candidate {candidate_id} did not converge")
+
+
+def _dispatch_candidate_refresh(
+    client: BeadClient,
+    args: argparse.Namespace,
+    candidate: Mapping[str, Any],
+    *,
+    now: str,
+) -> dict[str, Any]:
+    if not args.rig:
+        raise StateError("--rig is required to refresh a stale candidate")
+    if not args.full_gate_command:
+        raise StateError("--full-gate-command is required to refresh a stale candidate")
+    candidate_id = str(candidate["id"])
+    candidate = _seal_refresh_intent(
+        client, candidate_id, args, trunk_sha=args.trunk_sha
+    )
+    metadata = record_metadata(candidate)
+    state = str(metadata.get(STATE, ""))
+    if state == "queued":
+        candidate = _cas_transition(
+            client,
+            candidate_id,
+            "superseded",
+            now=now,
+            evidence={
+                "evidence_ref": (
+                    "stale-base:"
+                    f"{metadata.get(PREFIX + 'base_sha', '')[:12]}"
+                    f"->{args.trunk_sha[:12]}"
+                )
+            },
+        )
+        metadata = record_metadata(candidate)
+    elif state not in {"superseded", "rejected", "verified"}:
+        raise StateError(
+            f"candidate {candidate_id} cannot refresh from state {state!r}"
+        )
+    _release_owned_reservations(
+        client, candidate_id, metadata.get(PREFIX + "source_beads", [])
+    )
+    client.converge_status(
+        candidate_id,
+        "closed",
+        reason=(
+            "Thunderdome candidate superseded after trunk advanced"
+            if state == "superseded"
+            else "Thunderdome candidate rebuild follows failed epoch"
+        ),
+    )
+    existing_workflow = _metadata_text(metadata, REFRESH_WORKFLOW_ID)
+    if existing_workflow:
+        workflow_id = existing_workflow
+    else:
+        intent = metadata.get(REFRESH_INTENT)
+        if not isinstance(intent, Mapping):
+            raise StateError(f"candidate {candidate_id} has no sealed refresh intent")
+        response = client.run(
+            [
+                "sling",
+                str(intent["operator"]),
+                str(intent["delivery_unit"]),
+                "--on",
+                "thunderdome-build",
+                "--var",
+                f"target_ref={_target_branch(str(intent['target_ref']))}",
+                "--var",
+                f"aggregate_rust_gate_command={intent['full_gate_command']}",
+                "--json",
+            ],
+            extra_env={
+                "GC_EXPECTED_FORMULA_FINGERPRINT": str(intent["formula_digest"])
+            },
+        )
+        if not isinstance(response, Mapping):
+            raise CommandError("gc sling returned an invalid response")
+        root = response.get("root")
+        root_id = root.get("id") if isinstance(root, Mapping) else ""
+        workflow_id = str(
+            response.get("workflow_id")
+            or response.get("root_id")
+            or response.get("bead_id")
+            or root_id
+            or ""
+        )
+        if not workflow_id:
+            raise CommandError("gc sling returned no workflow identifier")
+        for _ in range(16):
+            candidate = client.authoritative_reread(candidate_id)
+            metadata = record_metadata(candidate)
+            current_workflow = _metadata_text(metadata, REFRESH_WORKFLOW_ID)
+            if current_workflow:
+                if current_workflow != workflow_id:
+                    raise StateError(
+                        f"candidate {candidate_id} has conflicting refresh workflow "
+                        f"{current_workflow}"
+                    )
+                workflow_id = current_workflow
+                break
+            updated = dict(metadata)
+            updated[REFRESH_WORKFLOW_ID] = workflow_id
+            if client.cas_envelope(candidate, updated) is not None:
+                break
+        else:
+            raise StateError(
+                f"refresh workflow linkage for candidate {candidate_id} did not converge"
+            )
+    return {
+        "candidate_id": candidate_id,
+        "delivery_unit": str(metadata.get(PREFIX + "delivery_unit", "")),
+        "workflow_id": workflow_id,
+    }
+
+
+def _workflow_failure(
+    client: BeadClient,
+    workflow_id: str,
+    *,
+    now: str,
+    timeout_seconds: int,
+) -> dict[str, str] | None:
+    if timeout_seconds < 1:
+        raise StateError("workflow_timeout_seconds must be at least 1")
+    try:
+        roots = client.show([workflow_id])
+    except CommandError:
+        roots = []
+    if not roots:
+        return {"failure_class": "infrastructure", "reason": "missing"}
+    root = roots[0]
+    if str(root.get("status", "")) == "closed":
+        return {"failure_class": "infrastructure", "reason": "closed-active"}
+    descendants = (
+        client.list_metadata("gc.root_bead_id", workflow_id)
+        if hasattr(client, "list_metadata")
+        else []
+    )
+    timestamps = [
+        parsed
+        for record in [root, *descendants]
+        for parsed in (
+            _parse_time(record.get("updated_at")),
+            _parse_time(record.get("created_at")),
+        )
+        if parsed is not None
+    ]
+    current = _parse_time(now)
+    if current is None:
+        raise StateError("now must be an RFC3339 timestamp")
+    if timestamps:
+        age_seconds = max(
+            0, int((current - max(timestamps)).total_seconds())
+        )
+        if age_seconds >= timeout_seconds:
+            return {
+                "failure_class": "timeout",
+                "reason": f"stalled-{age_seconds}s",
+            }
+    return None
+
+
+def unhealthy_active_epochs(
+    client: BeadClient,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    now: str,
+    timeout_seconds: int,
+) -> list[dict[str, str]]:
+    unhealthy: list[dict[str, str]] = []
+    for record in records:
+        metadata = record_metadata(record)
+        if (
+            metadata.get(KIND) != "epoch"
+            or metadata.get(STATE) in TERMINAL_EPOCH_STATES
+        ):
+            continue
+        workflow_id = _metadata_text(metadata, PREFIX + "workflow_id")
+        if not workflow_id:
+            continue
+        failure = _workflow_failure(
+            client,
+            workflow_id,
+            now=now,
+            timeout_seconds=timeout_seconds,
+        )
+        if failure is not None:
+            unhealthy.append(
+                {
+                    "epoch_id": str(record.get("id", "")),
+                    "workflow_id": workflow_id,
+                    **failure,
+                }
+            )
+    return unhealthy
+
+
+def recover_unhealthy_epochs(
+    client: BeadClient,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    now: str,
+    timeout_seconds: int,
+) -> list[dict[str, str]]:
+    unhealthy = unhealthy_active_epochs(
+        client,
+        records,
+        now=now,
+        timeout_seconds=timeout_seconds,
+    )
+    for item in unhealthy:
+        epoch = _cas_transition(
+            client,
+            item["epoch_id"],
+            "failed",
+            now=now,
+            evidence={
+                "failure_class": item["failure_class"],
+                "evidence_ref": (
+                    f"workflow:{item['workflow_id']}:{item['reason']}"
+                ),
+            },
+        )
+        epoch = converge_epoch(client, epoch, now=now)
+        _mark_and_emit_transition(client, epoch)
+    return unhealthy
+
+
+def recover_stale_candidates(
+    client: BeadClient,
+    args: argparse.Namespace,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    now: str,
+) -> list[dict[str, Any]]:
+    failed_epoch_ids = {
+        str(record.get("id", ""))
+        for record in records
+        if record_metadata(record).get(KIND) == "epoch"
+        and record_metadata(record).get(STATE) == "failed"
+    }
+    recoverable: list[Mapping[str, Any]] = []
+    for record in records:
+        metadata = record_metadata(record)
+        if metadata.get(KIND) != "candidate":
+            continue
+        state = metadata.get(STATE)
+        stale_queued = (
+            state == "queued"
+            and metadata.get(PREFIX + "base_sha") != args.trunk_sha
+        )
+        interrupted_refresh = (
+            state in {"superseded", "rejected", "verified"}
+            and isinstance(metadata.get(REFRESH_INTENT), Mapping)
+            and not metadata.get(REFRESH_WORKFLOW_ID)
+        )
+        failed_epoch_retry = (
+            state in {"rejected", "verified"}
+            and metadata.get(PREFIX + "epoch_id") in failed_epoch_ids
+            and not metadata.get(REFRESH_WORKFLOW_ID)
+        )
+        if stale_queued or interrupted_refresh or failed_epoch_retry:
+            recoverable.append(record)
+    return [
+        _dispatch_candidate_refresh(client, args, candidate, now=now)
+        for candidate in sorted(recoverable, key=lambda item: str(item.get("id", "")))
+    ]
+
+
+def terminal_cleanup_due(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    now: str,
+    grace_seconds: int,
+) -> list[Mapping[str, Any]]:
+    if grace_seconds < 0:
+        raise StateError("cleanup_grace_seconds must not be negative")
+    due: list[Mapping[str, Any]] = []
+    for record in records:
+        metadata = record_metadata(record)
+        if (
+            metadata.get(KIND) != "epoch"
+            or metadata.get(STATE) not in ABANDONED_EPOCH_STATES
+            or metadata.get(CLEANUP_WORKFLOW_ID)
+        ):
+            continue
+        age = _age_seconds(metadata.get(PREFIX + "updated_at"), now)
+        if age is not None and age >= grace_seconds:
+            due.append(record)
+    return sorted(due, key=lambda item: str(item.get("id", "")))
+
+
+def _cleanup_formula_digest(
+    client: BeadClient, epoch_id: str
+) -> str:
+    result = client.run(
+        [
+            "formula",
+            "show",
+            "thunderdome-cleanup",
+            "--var",
+            f"epoch_id={epoch_id}",
+            "--json",
+        ]
+    )
+    if not isinstance(result, Mapping):
+        raise CommandError("gc formula show returned an invalid response")
+    fingerprint = str(result.get("compiled_fingerprint", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise CommandError("gc formula show returned no compiled fingerprint")
+    return fingerprint
+
+
+def _dispatch_terminal_cleanup(
+    client: BeadClient,
+    args: argparse.Namespace,
+    epoch: Mapping[str, Any],
+) -> dict[str, str]:
+    if not args.rig:
+        raise StateError("--rig is required to dispatch terminal cleanup")
+    epoch_id = str(epoch["id"])
+    for _ in range(16):
+        epoch = client.authoritative_reread(epoch_id)
+        metadata = record_metadata(epoch)
+        existing = metadata.get(CLEANUP_INTENT)
+        if existing is not None:
+            if not isinstance(existing, Mapping):
+                raise StateError(f"epoch {epoch_id} has an invalid cleanup intent")
+            break
+        operator = args.operator if "/" in args.operator else f"{args.rig}/{args.operator}"
+        intent = {
+            "schema_version": "1",
+            "formula": "thunderdome-cleanup",
+            "formula_digest": _cleanup_formula_digest(client, epoch_id),
+            "operator": operator,
+            "rig": str(args.rig),
+            "epoch_id": epoch_id,
+        }
+        updated = dict(metadata)
+        updated[CLEANUP_INTENT] = intent
+        swapped = client.cas_envelope(epoch, updated)
+        if swapped is not None:
+            epoch = swapped
+            metadata = record_metadata(epoch)
+            break
+    else:
+        raise StateError(f"cleanup intent for epoch {epoch_id} did not converge")
+    workflow_id = _metadata_text(metadata, CLEANUP_WORKFLOW_ID)
+    if not workflow_id:
+        intent = metadata.get(CLEANUP_INTENT)
+        if not isinstance(intent, Mapping):
+            raise StateError(f"epoch {epoch_id} has no sealed cleanup intent")
+        response = client.run(
+            [
+                "sling",
+                str(intent["operator"]),
+                epoch_id,
+                "--on",
+                "thunderdome-cleanup",
+                "--var",
+                f"epoch_id={epoch_id}",
+                "--json",
+            ],
+            extra_env={
+                "GC_EXPECTED_FORMULA_FINGERPRINT": str(intent["formula_digest"])
+            },
+        )
+        if not isinstance(response, Mapping):
+            raise CommandError("gc sling returned an invalid response")
+        root = response.get("root")
+        root_id = root.get("id") if isinstance(root, Mapping) else ""
+        workflow_id = str(
+            response.get("workflow_id")
+            or response.get("root_id")
+            or response.get("bead_id")
+            or root_id
+            or ""
+        )
+        if not workflow_id:
+            raise CommandError("gc sling returned no workflow identifier")
+        for _ in range(16):
+            epoch = client.authoritative_reread(epoch_id)
+            metadata = record_metadata(epoch)
+            current = _metadata_text(metadata, CLEANUP_WORKFLOW_ID)
+            if current:
+                if current != workflow_id:
+                    raise StateError(
+                        f"epoch {epoch_id} has conflicting cleanup workflow {current}"
+                    )
+                workflow_id = current
+                break
+            updated = dict(metadata)
+            updated[CLEANUP_WORKFLOW_ID] = workflow_id
+            if client.cas_envelope(epoch, updated) is not None:
+                break
+        else:
+            raise StateError(
+                f"cleanup workflow linkage for epoch {epoch_id} did not converge"
+            )
+    return {"epoch_id": epoch_id, "workflow_id": workflow_id}
+
+
+def dispatch_deferred_cleanups(
+    client: BeadClient,
+    args: argparse.Namespace,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    now: str,
+    grace_seconds: int,
+) -> list[dict[str, str]]:
+    return [
+        _dispatch_terminal_cleanup(client, args, epoch)
+        for epoch in terminal_cleanup_due(
+            records, now=now, grace_seconds=grace_seconds
+        )
+    ]
+
+
 def _repair_reasons(
     records: Sequence[Mapping[str, Any]],
     source_records: Mapping[str, Mapping[str, Any]],
@@ -2441,7 +3063,41 @@ def repair_ledger(
 
 def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
     now = args.now or utc_now()
+    pending_ingress = (
+        client.list_metadata(INGRESS_STATE, INGRESS_REVIEWED)
+        if hasattr(client, "list_metadata")
+        else []
+    )
+    ingressed_candidate_ids: list[str] = []
+    if not args.dry_run:
+        ingressed_candidate_ids = [
+            str(candidate["id"])
+            for candidate in (
+                ingest_reviewed_candidate(client, workflow, now=now)
+                for workflow in pending_ingress
+            )
+        ]
+    cleanup_grace_seconds = int(
+        getattr(args, "cleanup_grace_seconds", 3600)
+    )
     records = client.list_thunderdome()
+    workflow_timeout_seconds = int(
+        getattr(args, "workflow_timeout_seconds", 7200)
+    )
+    unhealthy_epochs: list[dict[str, str]] = []
+    refreshed_candidates: list[dict[str, Any]] = []
+    if not args.dry_run:
+        unhealthy_epochs = recover_unhealthy_epochs(
+            client,
+            records,
+            now=now,
+            timeout_seconds=workflow_timeout_seconds,
+        )
+        records = client.list_thunderdome()
+        refreshed_candidates = recover_stale_candidates(
+            client, args, records, now=now
+        )
+        records = client.list_thunderdome()
     source_ids = sorted(
         {
             source_id
@@ -2472,12 +3128,56 @@ def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
             max_depth=args.max_depth,
             max_age_seconds=args.max_age_seconds,
         )
+        ingress_workflow_ids = sorted(
+            str(workflow.get("id", "")) for workflow in pending_ingress
+        )
+        unhealthy_epochs = unhealthy_active_epochs(
+            client,
+            records,
+            now=now,
+            timeout_seconds=workflow_timeout_seconds,
+        )
+        cleanup_epoch_ids = [
+            str(epoch.get("id", ""))
+            for epoch in terminal_cleanup_due(
+                records,
+                now=now,
+                grace_seconds=cleanup_grace_seconds,
+            )
+        ]
         if repair_reasons:
             return {
                 **plan,
                 "ok": True,
                 "action": "would_repair",
                 "repair_reasons": repair_reasons,
+            }
+        if ingress_workflow_ids:
+            return {
+                **plan,
+                "ok": True,
+                "action": "would_ingest",
+                "ingress_workflow_ids": ingress_workflow_ids,
+            }
+        if unhealthy_epochs:
+            return {
+                **plan,
+                "ok": True,
+                "action": "would_fail_workflow",
+                "unhealthy_epochs": unhealthy_epochs,
+            }
+        if plan["stale_candidate_ids"]:
+            return {
+                **plan,
+                "ok": True,
+                "action": "would_refresh",
+            }
+        if cleanup_epoch_ids:
+            return {
+                **plan,
+                "ok": True,
+                "action": "would_cleanup",
+                "cleanup_epoch_ids": cleanup_epoch_ids,
             }
         if plan["active_epoch_ids"]:
             active = {
@@ -2499,6 +3199,23 @@ def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
         }
 
     records = repair_ledger(client, records, now=now)
+    cleanup_dispatches = dispatch_deferred_cleanups(
+        client,
+        args,
+        records,
+        now=now,
+        grace_seconds=cleanup_grace_seconds,
+    )
+    records = client.list_thunderdome()
+    refresh_workflow_ids = sorted(
+        str(item["workflow_id"]) for item in refreshed_candidates
+    )
+    recovered_epoch_ids = sorted(
+        item["epoch_id"] for item in unhealthy_epochs
+    )
+    cleanup_workflow_ids = sorted(
+        item["workflow_id"] for item in cleanup_dispatches
+    )
     source_ids = sorted(
         {
             source_id
@@ -2540,10 +3257,51 @@ def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
             if metadata.get(STATE) == "assembling" and not metadata.get(
                 PREFIX + "workflow_id"
             ):
-                return _dispatch_epoch(client, args, epoch)
-        return {**plan, "ok": True, "action": "none"}
+                return {
+                    **_dispatch_epoch(client, args, epoch),
+                    "ingressed_candidate_ids": ingressed_candidate_ids,
+                    "refresh_workflow_ids": refresh_workflow_ids,
+                    "cleanup_workflow_ids": cleanup_workflow_ids,
+                }
+        return {
+            **plan,
+            "ok": True,
+            "action": (
+                "recovered_workflow"
+                if recovered_epoch_ids
+                else "refreshed_stale"
+                if refresh_workflow_ids
+                else "ingested"
+                if ingressed_candidate_ids
+                else "cleanup_dispatched"
+                if cleanup_workflow_ids
+                else "none"
+            ),
+            "ingressed_candidate_ids": ingressed_candidate_ids,
+            "refresh_workflow_ids": refresh_workflow_ids,
+            "recovered_epoch_ids": recovered_epoch_ids,
+            "cleanup_workflow_ids": cleanup_workflow_ids,
+        }
     if not plan["due"]:
-        return {**plan, "ok": True, "action": "none"}
+        return {
+            **plan,
+            "ok": True,
+            "action": (
+                "recovered_workflow"
+                if recovered_epoch_ids
+                else "refreshed_stale"
+                if refresh_workflow_ids
+                else "ingested"
+                if ingressed_candidate_ids
+                else "cleanup_dispatched"
+                if cleanup_workflow_ids
+                else "none"
+            ),
+            "ingressed_candidate_ids": ingressed_candidate_ids,
+            "refresh_workflow_ids": refresh_workflow_ids,
+            "recovered_epoch_ids": recovered_epoch_ids,
+            "cleanup_workflow_ids": cleanup_workflow_ids,
+        }
     epoch_args = argparse.Namespace(
         candidate=plan["candidate_ids"],
         base_sha=args.trunk_sha,
@@ -2551,7 +3309,12 @@ def reconcile(client: BeadClient, args: argparse.Namespace) -> dict[str, Any]:
         now=args.now,
     )
     epoch = open_epoch(client, epoch_args)
-    return _dispatch_epoch(client, args, epoch)
+    return {
+        **_dispatch_epoch(client, args, epoch),
+        "ingressed_candidate_ids": ingressed_candidate_ids,
+        "refresh_workflow_ids": refresh_workflow_ids,
+        "cleanup_workflow_ids": cleanup_workflow_ids,
+    }
 
 
 def migrate_legacy_records(client: BeadClient) -> dict[str, Any]:
@@ -2691,6 +3454,12 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_command.add_argument("--trunk-sha", required=True)
     reconcile_command.add_argument("--max-depth", type=int, default=8)
     reconcile_command.add_argument("--max-age-seconds", type=int, default=1800)
+    reconcile_command.add_argument(
+        "--workflow-timeout-seconds", type=int, default=7200
+    )
+    reconcile_command.add_argument(
+        "--cleanup-grace-seconds", type=int, default=3600
+    )
     reconcile_command.add_argument("--target-ref", default="refs/heads/main")
     reconcile_command.add_argument("--operator", default="gc.run-operator")
     reconcile_command.add_argument("--full-gate-command", default="")

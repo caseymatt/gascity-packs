@@ -48,6 +48,7 @@ FORMULAS = {
     "review",
     "same-session-implement",
     "thunderdome-build",
+    "thunderdome-cleanup",
     "thunderdome-land",
     "thunderdome-work-item",
 }

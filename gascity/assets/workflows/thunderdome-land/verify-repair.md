@@ -87,17 +87,32 @@ If the gate fails:
    `SCCACHE_CACHE_SIZE` unchanged and explicit on every Cargo command.
    Merge every successful published repair commit into this branch and resolve
    aggregate overlaps without omitting a repair. After the repair integration
-   head is final and clean, publish it before opening its PR:
+   head is final and clean, publish it through the registered capability before
+   opening its PR:
 
    ```bash
    gc worktree publish "repair-int-<epoch-id>-r<N>" --json
    ```
 
    Require `published_sha` to equal its exact current `HEAD`; persist and read
-   back `gc.thunderdome.published_ref` and `gc.thunderdome.published_sha`.
-   Never invoke `git push` directly. Open one repair PR from the controlled
-   `published_ref`, use protected checks and the merge queue, and read the
-   actual merged SHA from GitHub. Publication or head ambiguity is failure and
+   back `gc.thunderdome.published_ref` and `gc.thunderdome.published_sha`. The
+   Code Storage `published_ref` is durable recovery evidence and must never be
+   passed to GitHub.
+
+   Publish the exact durable SHA to the unique GitHub integration ref
+   `refs/heads/thunderdome/repair-<epoch-id>-r<N>`. Read that full ref first
+   with `git ls-remote --refs origin`. If absent, create it with an
+   absence-guarded lease; if present, require it to equal `published_sha`:
+
+   ```bash
+   git push --force-with-lease="refs/heads/thunderdome/repair-<epoch-id>-r<N>:" \
+     origin "<published-sha>:refs/heads/thunderdome/repair-<epoch-id>-r<N>"
+   ```
+
+   Read the remote ref back and require one exact `published_sha` match. Open
+   one repair PR from the validated GitHub branch name, use protected checks
+   and the merge queue, and read the actual merged SHA from GitHub.
+   Publication, lease, remote-readback, or head ambiguity is failure and
    preserves the registered repair checkout. Close repair beads only after
    their fixes are present in that actual merged SHA.
 6. Transition `repairing` to `verifying` with

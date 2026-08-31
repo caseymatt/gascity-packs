@@ -111,11 +111,19 @@ class DeterministicRunner:
                 args, [self._copy(self.records[bead_id]) for bead_id in ids]
             )
         if command[:2] == ["bd", "list"]:
-            rows = [
-                self._copy(record)
-                for record in self.records.values()
-                if self.module.KIND in record.get("metadata", {})
-            ]
+            if "--metadata-field" in command:
+                key, expected = self._value(command, "--metadata-field").split("=", 1)
+                rows = [
+                    self._copy(record)
+                    for record in self.records.values()
+                    if record.get("metadata", {}).get(key) == expected
+                ]
+            else:
+                rows = [
+                    self._copy(record)
+                    for record in self.records.values()
+                    if self.module.KIND in record.get("metadata", {})
+                ]
             return self._completed(args, rows)
         if command[:2] == ["bd", "create"]:
             bead_id = self._value(command, "--id")
@@ -936,16 +944,17 @@ class FormulaContractTests(unittest.TestCase):
         for lifecycle_fragment in (
             "gc.worktree.id=thunderdome-candidate-<workflow-root-id>",
             "gc.worktree.owner=<workflow-root-id>",
-            'gc bd update "<candidate-id>"',
-            'gc bd show "<candidate-id>" --json',
-            "JSON object or a one-element list",
-            "gc.thunderdome.kind=candidate",
-            "gc.thunderdome.state=queued",
-            "Do not acknowledge or hand off the queued state",
+            'gc bd metadata-cas "<workflow-root-id>"',
+            "gc.thunderdome.ingress_state",
+            "gc.thunderdome.summary_path",
+            "gc.thunderdome.review_path",
             "gc.thunderdome.candidate_id",
+            "city-scoped Thunderdome reconcile order",
         ):
             with self.subTest(lifecycle_fragment=lifecycle_fragment):
                 self.assertIn(lifecycle_fragment, candidate_enqueue)
+        self.assertIn("Do not invoke `candidate enqueue`", candidate_enqueue)
+        self.assertNotIn("candidate enqueue \\", candidate_enqueue)
 
         for asset in (candidate_integrate, candidate_validate):
             with self.subTest(asset=asset[:36]):
@@ -1045,8 +1054,9 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("never bisect", repair.lower())
         self.assertIn("gc.thunderdome.state=promoted", promote)
         self.assertIn("close source", promote.lower())
-        self.assertIn("{{pack_root}}/assets/scripts/thunderdome.py", enqueue)
-        self.assertIn("candidate enqueue", enqueue)
+        self.assertIn("gc.thunderdome.ingress_state", enqueue)
+        self.assertIn("automatic candidate ingress", enqueue)
+        self.assertIn("Do not invoke `candidate enqueue`", enqueue)
         self.assertIn("adapter transition atomically closes", promote.lower())
         self.assertNotIn("gc bd close", promote)
 
@@ -1064,7 +1074,7 @@ class FormulaContractTests(unittest.TestCase):
         enqueue = self.prompt("thunderdome-build/enqueue.md")
         freeze = self.prompt("thunderdome-land/freeze.md")
         assemble = self.prompt("thunderdome-land/assemble-land.md")
-        self.assertIn('thunderdome.py --rig "${GC_RIG_NAME:?}"', enqueue)
+        self.assertIn("gc.thunderdome.ingress_state", enqueue)
         self.assertIn('thunderdome.py --rig "${GC_RIG_NAME:?}"', freeze)
         self.assertNotIn("--epoch-id", assemble)
         self.assertNotIn("--state landed", assemble)
@@ -1230,6 +1240,56 @@ class ReconcilePlannerTests(unittest.TestCase):
         self.assertEqual(result["action"], "would_repair")
         self.assertTrue(result["repair_reasons"])
 
+    def test_reconcile_ingests_a_reviewed_delivery_before_planning(self) -> None:
+        runner = DeterministicRunner(self.module)
+        runner.add("sp-source-a", metadata={})
+        runner.add(
+            "sp-build-a",
+            status="closed",
+            metadata={
+                self.module.INGRESS_STATE: self.module.INGRESS_REVIEWED,
+                self.module.PREFIX + "delivery_unit": "sp-delivery-a",
+                self.module.PREFIX + "source_beads": ["sp-source-a"],
+                self.module.PREFIX + "commit": COMMIT_SHA,
+                self.module.PREFIX + "validation_commit": COMMIT_SHA,
+                self.module.PREFIX + "base_sha": BASE_SHA,
+                self.module.PREFIX + "summary_path": "/summary-a.json",
+                self.module.PREFIX + "review_path": "/review-a.json",
+                "gc.worktree.id": "thunderdome-candidate-sp-build-a",
+                "gc.worktree.owner": "sp-build-a",
+            },
+        )
+        client = self.module.BeadClient(rig="sprocket", runner=runner)
+        args = self.module.argparse.Namespace(
+            rig="sprocket",
+            now=LATER,
+            trunk_sha=BASE_SHA,
+            max_depth=8,
+            max_age_seconds=1800,
+            dry_run=False,
+            full_gate_command="just ci",
+            operator="gc.run-operator",
+            target_ref="refs/heads/main",
+        )
+
+        result = self.module.reconcile(client, args)
+
+        self.assertEqual(result["action"], "ingested")
+        self.assertEqual(len(result["ingressed_candidate_ids"]), 1)
+        candidate_id = result["ingressed_candidate_ids"][0]
+        candidate = client.authoritative_reread(candidate_id)
+        self.assertEqual(
+            self.module.record_metadata(candidate)[self.module.STATE], "queued"
+        )
+        self.assertEqual(
+            self.module.raw_metadata(candidate)["gc.worktree.owner"], "sp-build-a"
+        )
+        source = runner.records["sp-source-a"]
+        self.assertEqual(source["metadata"][self.module.CANDIDATE_ID], candidate_id)
+        workflow = runner.records["sp-build-a"]["metadata"]
+        self.assertEqual(workflow[self.module.INGRESS_STATE], self.module.INGRESS_QUEUED)
+        self.assertEqual(workflow[self.module.INGRESS_CANDIDATE_ID], candidate_id)
+
 
 class RecoveryProtocolTests(unittest.TestCase):
     @classmethod
@@ -1319,6 +1379,130 @@ class RecoveryProtocolTests(unittest.TestCase):
                 self.module.os.environ[key] = previous
 
         self.addCleanup(restore)
+
+    def test_stale_candidate_is_superseded_released_and_refreshed_once(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        candidate_id = str(candidate["id"])
+        args = self.reconcile_args()
+        args.trunk_sha = "5" * 40
+        self.runner.lose_next_sling = True
+
+        with self.assertRaises(self.module.CommandError):
+            self.module.reconcile(self.client, args)
+        stale = self.client.authoritative_reread(candidate_id)
+        self.assertEqual(
+            self.module.record_metadata(stale)[self.module.STATE], "superseded"
+        )
+        self.assertEqual(stale["status"], "closed")
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"][self.module.CANDIDATE_ID],
+            "",
+        )
+
+        result = self.module.reconcile(self.client, args)
+
+        self.assertEqual(result["action"], "refreshed_stale")
+        self.assertEqual(result["refresh_workflow_ids"], ["wf-delivery-a"])
+        self.assertEqual(self.runner.sling_effects, 1)
+        refreshed = self.module.record_metadata(
+            self.client.authoritative_reread(candidate_id)
+        )
+        self.assertEqual(
+            refreshed[self.module.REFRESH_WORKFLOW_ID], "wf-delivery-a"
+        )
+        sling = next(call for call in self.runner.calls if "sling" in call)
+        command_index = sling.index("sling")
+        self.assertEqual(
+            sling[command_index : command_index + 5],
+            [
+                "sling",
+                "sprocket/gc.run-operator",
+                "delivery-a",
+                "--on",
+                "thunderdome-build",
+            ],
+        )
+
+    def test_closed_active_workflow_fails_epoch_and_rebuilds_delivery(self) -> None:
+        self.add_source("sp-source-a")
+        candidate = self.enqueue(["sp-source-a"])
+        epoch = self.open_epoch([str(candidate["id"])])
+        epoch_id = str(epoch["id"])
+        dispatched = self.module._dispatch_epoch(
+            self.client, self.reconcile_args(), epoch
+        )
+        self.runner.add(
+            dispatched["workflow_id"],
+            status="closed",
+            metadata={"gc.outcome": "fail"},
+        )
+
+        result = self.module.reconcile(self.client, self.reconcile_args())
+
+        self.assertEqual(result["action"], "recovered_workflow")
+        self.assertEqual(result["recovered_epoch_ids"], [epoch_id])
+        self.assertEqual(result["refresh_workflow_ids"], ["wf-delivery-a"])
+        failed_epoch = self.client.authoritative_reread(epoch_id)
+        self.assertEqual(
+            self.module.record_metadata(failed_epoch)[self.module.STATE], "failed"
+        )
+        self.assertEqual(failed_epoch["status"], "closed")
+        failed_candidate = self.client.authoritative_reread(str(candidate["id"]))
+        self.assertEqual(
+            self.module.record_metadata(failed_candidate)[self.module.STATE],
+            "rejected",
+        )
+        self.assertEqual(
+            self.runner.records["sp-source-a"]["metadata"][self.module.CANDIDATE_ID],
+            "",
+        )
+
+    def test_terminal_cleanup_dispatches_once_after_grace(self) -> None:
+        metadata = self.module.new_epoch_metadata(
+            candidate_ids=["sp-candidate-a"],
+            base_sha=BASE_SHA,
+            target_ref="refs/heads/main",
+            now=NOW,
+        )
+        metadata = self.module.transition_metadata(
+            metadata,
+            "failed",
+            now=LATER,
+            evidence={
+                "failure_class": "infrastructure",
+                "evidence_ref": "artifact://failed",
+            },
+        )
+        epoch_id = self.module.epoch_record_id(metadata)
+        self.runner.add(epoch_id, status="closed", envelope=metadata)
+        args = self.reconcile_args()
+
+        first = self.module.dispatch_deferred_cleanups(
+            self.client,
+            args,
+            self.client.list_thunderdome(),
+            now="2026-08-18T15:05:00Z",
+            grace_seconds=3600,
+        )
+        second = self.module.dispatch_deferred_cleanups(
+            self.client,
+            args,
+            self.client.list_thunderdome(),
+            now="2026-08-18T15:06:00Z",
+            grace_seconds=3600,
+        )
+
+        self.assertEqual(first, [{"epoch_id": epoch_id, "workflow_id": f"wf-{epoch_id}"}])
+        self.assertEqual(second, [])
+        persisted = self.module.record_metadata(
+            self.client.authoritative_reread(epoch_id)
+        )
+        self.assertEqual(persisted[self.module.CLEANUP_WORKFLOW_ID], f"wf-{epoch_id}")
+        self.assertEqual(
+            persisted[self.module.CLEANUP_INTENT]["formula"],
+            "thunderdome-cleanup",
+        )
 
     def test_concurrent_same_key_enqueue_converges_to_one_candidate(self) -> None:
         self.add_source("sp-source-a")
