@@ -891,13 +891,13 @@ class FormulaAssetTests(unittest.TestCase):
             env = {
                 **os.environ,
                 "GC_AGENT": "gc.run-operator",
+                "BEADS_ACTOR": "sprocket--gc__run-operator-8-pool",
                 "GC_SESSION_ID": "session-1",
                 "GC_SESSION_NAME": "sprocket--gc__run-operator-8-pool",
                 "GC_PACK_DIR": str(root),
                 "GC_PACK_NAME": "gc",
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
             }
-            env.pop("BEADS_ACTOR", None)
             result = subprocess.run([str(command)], capture_output=True, env=env, text=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)

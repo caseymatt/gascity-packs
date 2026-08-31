@@ -112,6 +112,21 @@ for child in children:
 EXPECTED_ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}}"
 EXPECTED_ROUTE="${GC_TEMPLATE:-${GC_AGENT:-}}"
 
+expected_assignee_matches() {
+    candidate="$1"
+    for expected in \
+        "${BEADS_ACTOR:-}" \
+        "${GC_SESSION_ID:-}" \
+        "${GC_SESSION_NAME:-}" \
+        "${GC_AGENT:-}"
+    do
+        if [ -n "$expected" ] && [ "$candidate" = "$expected" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 if [ -z "$EXPECTED_ASSIGNEE" ]; then
     echo "CONFIG_REJECTED gc ${GC_PACK_NAME:-gascity} claim: missing expected assignee" >&2
     acknowledge_drain_or_report || true
@@ -209,7 +224,7 @@ while [ "$verify_try" -lt "$max_attempts" ]; do
             printf 'CLAIM_REJECTED unexpected status for %s: %s\n' \
                 "$work_id" "$claim_status" >&2
             break
-        elif [ "$claim_assignee" != "$EXPECTED_ASSIGNEE" ]; then
+        elif ! expected_assignee_matches "$claim_assignee"; then
             printf 'CLAIM_REJECTED assignee mismatch for %s\n' "$work_id" >&2
             break
         elif [ -n "$EXPECTED_ROUTE" ] && [ -n "$claim_route" ] && [ "$claim_route" != "$EXPECTED_ROUTE" ]; then
