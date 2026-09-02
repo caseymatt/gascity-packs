@@ -8,12 +8,13 @@ equals that value, and transition `landed` or `repairing` to `verifying` through
 `{{pack_root}}/assets/scripts/thunderdome.py epoch transition`.
 
 For verification round `<N>` starting at 1, create or exactly reuse lifecycle ID
-`verify-<epoch-id>-r<N>`, owner `<epoch-id>`, attempt `1`, and explicit path
+`<epoch-id>-verify-r<N>` so the Code Storage signer can authorize its rig bead
+prefix, owner `<epoch-id>`, attempt `1`, and explicit path
 `$GC_RIG_ROOT/worktrees/verify-<epoch-id>-r<N>` at that exact landed commit:
 
 ```bash
-verify_worktree_id="verify-<epoch-id>-r<N>"
-verify_worktree="${GC_RIG_ROOT:?}/worktrees/$verify_worktree_id"
+verify_worktree_id="<epoch-id>-verify-r<N>"
+verify_worktree="${GC_RIG_ROOT:?}/worktrees/verify-<epoch-id>-r<N>"
 gc worktree create "$verify_worktree_id" \
   --owner "<epoch-id>" --rig "${GC_RIG_NAME:?}" --path "$verify_worktree" \
   --base "<current-landed-sha>" --attempt 1 --json
@@ -26,7 +27,7 @@ and `head_sha` to match exactly and require no branch. Persist and read back
 repository-owned command exactly as
 configured, `{{full_gate_command}}`, from the returned `path` with the returned
 cache environment explicitly supplied unchanged. Require `cargo_target_dir` to
-be `$GC_RIG_ROOT/worktrees/.cargo-targets/verify-<epoch-id>-r<N>/attempt-1` and
+be `$GC_RIG_ROOT/worktrees/.cargo-targets/<epoch-id>-verify-r<N>/attempt-1` and
 `cargo_home` to be `$GC_RIG_ROOT/.gc/cache/cargo-home`. The launcher supplies
 the shared sccache contract: require nonempty inherited `RUSTC_WRAPPER`,
 `SCCACHE_DIR`, and `SCCACHE_CACHE_SIZE`, do not rewrite them, and pass them plus
@@ -61,14 +62,14 @@ If the gate fails:
    payload matching; do not poll. Require every repair implementation and
    artifact to close pass.
 5. Create or exactly reuse the repair integration checkout with lifecycle ID
-   `repair-int-<epoch-id>-r<N>`, explicit path
+   `<epoch-id>-repair-int-r<N>`, explicit path
    `$GC_RIG_ROOT/worktrees/repair-int-<epoch-id>-r<N>`, owner `<epoch-id>`,
    attempt `1`, branch `thunderdome/repair-<epoch-id>-r<N>`, and base equal to
    the exact failed trunk SHA:
 
    ```bash
-   repair_worktree_id="repair-int-<epoch-id>-r<N>"
-   repair_worktree="${GC_RIG_ROOT:?}/worktrees/$repair_worktree_id"
+   repair_worktree_id="<epoch-id>-repair-int-r<N>"
+   repair_worktree="${GC_RIG_ROOT:?}/worktrees/repair-int-<epoch-id>-r<N>"
    gc worktree create "$repair_worktree_id" \
      --owner "<epoch-id>" --rig "${GC_RIG_NAME:?}" --path "$repair_worktree" \
      --base "<failed-trunk-sha>" \
@@ -81,7 +82,7 @@ If the gate fails:
    round. If this build-bearing integration runs a command, launch it with the
    registered Cargo environment unchanged and require `cargo_target_dir` to
    equal
-   `$GC_RIG_ROOT/worktrees/.cargo-targets/repair-int-<epoch-id>-r<N>/attempt-1`
+   `$GC_RIG_ROOT/worktrees/.cargo-targets/<epoch-id>-repair-int-r<N>/attempt-1`
    and `cargo_home` to equal `$GC_RIG_ROOT/.gc/cache/cargo-home`. Require the
    launcher's nonempty `RUSTC_WRAPPER`, `SCCACHE_DIR`, and
    `SCCACHE_CACHE_SIZE` unchanged and explicit on every Cargo command.
@@ -91,7 +92,7 @@ If the gate fails:
    opening its PR:
 
    ```bash
-   gc worktree publish "repair-int-<epoch-id>-r<N>" --json
+   gc worktree publish "<epoch-id>-repair-int-r<N>" --json
    ```
 
    Require `published_sha` to equal its exact current `HEAD`; persist and read

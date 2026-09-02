@@ -8,13 +8,13 @@ invariant violation. Run `git fetch --no-tags origin "{{target_ref}}"`, resolve
 `FETCH_HEAD`, and fail closed if that exact SHA no longer equals the pinned base.
 
 Create or exactly reuse the registered epoch checkout with lifecycle ID
-`thunderdome-epoch-<epoch-id>`, owner `<epoch-id>`, attempt `1`, branch
-`thunderdome/epoch-<epoch-id>`, and path
-`$GC_RIG_ROOT/worktrees/thunderdome-epoch-<epoch-id>`:
+`<epoch-id>` so the Code Storage signer can authorize its rig bead prefix,
+owner `<epoch-id>`, attempt `1`, branch `thunderdome/epoch-<epoch-id>`, and
+path `$GC_RIG_ROOT/worktrees/thunderdome-epoch-<epoch-id>`:
 
 ```bash
-epoch_worktree_id="thunderdome-epoch-<epoch-id>"
-epoch_worktree="${GC_RIG_ROOT:?}/worktrees/$epoch_worktree_id"
+epoch_worktree_id="<epoch-id>"
+epoch_worktree="${GC_RIG_ROOT:?}/worktrees/thunderdome-epoch-<epoch-id>"
 gc worktree create "$epoch_worktree_id" \
   --owner "<epoch-id>" --rig "${GC_RIG_NAME:?}" --path "$epoch_worktree" \
   --base "{{base_sha}}" --branch "thunderdome/epoch-<epoch-id>" \
@@ -27,7 +27,7 @@ is reusable only when every field matches; otherwise fail closed. Persist
 `gc.worktree.id`, canonical `gc.worktree.path`, legacy `gc.work_dir`,
 `gc.cargo_target_dir`, and `gc.cargo_home` on the workflow root and read them back.
 Require `cargo_target_dir` to equal
-`$GC_RIG_ROOT/worktrees/.cargo-targets/thunderdome-epoch-<epoch-id>/attempt-1`
+`$GC_RIG_ROOT/worktrees/.cargo-targets/<epoch-id>/attempt-1`
 and `cargo_home` to equal `$GC_RIG_ROOT/.gc/cache/cargo-home`. The launcher
 supplies the shared sccache contract: require nonempty inherited
 `RUSTC_WRAPPER`, `SCCACHE_DIR`, and `SCCACHE_CACHE_SIZE`, do not rewrite them,
@@ -55,7 +55,7 @@ After the aggregate head is final and clean, publish it through the registered
 capability before opening the PR:
 
 ```bash
-gc worktree publish "thunderdome-epoch-<epoch-id>" --json
+gc worktree publish "<epoch-id>" --json
 ```
 
 Require returned `published_sha` to equal the checkout's current exact `HEAD`.

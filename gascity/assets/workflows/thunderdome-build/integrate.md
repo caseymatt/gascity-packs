@@ -28,9 +28,9 @@ For each sorted source bead ID:
    publication has been verified through both `gc worktree list` and the local
    checkout.
 
-The candidate integration lifecycle ID is uniquely
-`thunderdome-candidate-<workflow-root-id>` and its owner is the exact workflow
-root ID. Resolve and canonicalize `${GC_RIG_ROOT:?}`, require
+The candidate integration lifecycle ID is exactly `<workflow-root-id>` so the
+Code Storage signer can authorize its rig bead prefix. Its owner is the same
+workflow root ID. Resolve and canonicalize `${GC_RIG_ROOT:?}`, require
 `${GC_RIG_NAME:?}`, and set its only permitted path and branch to:
 
 ```text
@@ -41,7 +41,7 @@ thunderdome/candidate-<workflow-root-id>
 From `$GC_RIG_ROOT`, create or exactly reuse it at the pinned candidate base:
 
 ```sh
-gc worktree create "thunderdome-candidate-<workflow-root-id>" \
+gc worktree create "<workflow-root-id>" \
   --owner "<workflow-root-id>" \
   --rig "${GC_RIG_NAME:?}" \
   --path "${GC_RIG_ROOT:?}/worktrees/thunderdome-candidate-<workflow-root-id>" \
@@ -60,7 +60,7 @@ object, require them to be absolute, writable, outside `/tmp`, and require the
 cache paths to equal:
 
 ```text
-$GC_RIG_ROOT/worktrees/.cargo-targets/thunderdome-candidate-<workflow-root-id>/attempt-1
+$GC_RIG_ROOT/worktrees/.cargo-targets/<workflow-root-id>/attempt-1
 $GC_RIG_ROOT/.gc/cache/cargo-home
 ```
 
@@ -88,14 +88,14 @@ Before any candidate can hand off to validation, including a candidate that
 later loses validation or review, publish it from `$GC_RIG_ROOT`:
 
 ```sh
-gc worktree publish "thunderdome-candidate-<workflow-root-id>" --json
+gc worktree publish "<workflow-root-id>" --json
 ```
 
 Publication is mandatory. A missing command/helper, nonzero exit, malformed
 JSON, empty `published_ref`, or any mismatch fails integration. Require
 `published=true`, `published_sha=<integration HEAD>`, matching `head_sha`,
 `id`, `owner`, and `path`; then run
-`gc worktree list "thunderdome-candidate-<workflow-root-id>" --json` and verify
+`gc worktree list "<workflow-root-id>" --json` and verify
 its sole entry contains the same `published_ref` and `published_sha` and a
 nonempty `published_at`.
 
@@ -106,7 +106,7 @@ Only after verified publication, record and read back on the workflow root:
 - `gc.thunderdome.integration_worktree=<registered path>`
 - `gc.thunderdome.published_ref=<published_ref>`
 - `gc.thunderdome.published_sha=<integration HEAD>`
-- `gc.worktree.id=thunderdome-candidate-<workflow-root-id>`
+- `gc.worktree.id=<workflow-root-id>`
 - `gc.worktree.owner=<workflow-root-id>`
 - `gc.worktree.path=<registered path>`
 - `work_dir=<registered path>`

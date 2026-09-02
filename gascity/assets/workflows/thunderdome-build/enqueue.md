@@ -9,7 +9,7 @@ require `code_review.verdict=approved`, a closed-pass check, and a schema-valid
 report. Verify the integration worktree is clean, `HEAD` still equals both
 recorded commits, and every source bead remains open.
 
-Read `gc.worktree.id=thunderdome-candidate-<workflow-root-id>` and
+Read `gc.worktree.id=<workflow-root-id>` and
 `gc.worktree.owner=<workflow-root-id>` from the build workflow root. Hard-fail
 if either field is absent or differs from the exact typed workflow identity.
 

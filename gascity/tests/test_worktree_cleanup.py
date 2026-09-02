@@ -293,11 +293,13 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
 
         self.assertIn('gc worktree create "<source-anchor-id>"', item)
         self.assertIn("thunderdome-candidate-<workflow-root-id>", candidate)
-        self.assertIn("gc worktree create", candidate)
+        self.assertIn('gc worktree create "<workflow-root-id>"', candidate)
         self.assertIn("thunderdome-epoch-<epoch-id>", assemble)
-        self.assertIn("gc worktree create", assemble)
+        self.assertIn('epoch_worktree_id="<epoch-id>"', assemble)
         self.assertIn("verify-<epoch-id>-r<N>", verify)
+        self.assertIn('verify_worktree_id="<epoch-id>-verify-r<N>"', verify)
         self.assertIn("repair-int-<epoch-id>-r<N>", verify)
+        self.assertIn('repair_worktree_id="<epoch-id>-repair-int-r<N>"', verify)
         self.assertIn(
             "$GC_RIG_ROOT/worktrees/repair-int-<epoch-id>-r<N>",
             verify,
@@ -331,19 +333,19 @@ class ThunderdomeCleanupContractTests(unittest.TestCase):
         verify = VERIFY_PROMPT.read_text(encoding="utf-8")
 
         self.assertIn(
-            "$GC_RIG_ROOT/worktrees/.cargo-targets/thunderdome-epoch-<epoch-id>/attempt-1",
+            "$GC_RIG_ROOT/worktrees/.cargo-targets/<epoch-id>/attempt-1",
             assemble,
         )
         self.assertIn(
-            "$GC_RIG_ROOT/worktrees/.cargo-targets/verify-<epoch-id>-r<N>/attempt-1",
+            "$GC_RIG_ROOT/worktrees/.cargo-targets/<epoch-id>-verify-r<N>/attempt-1",
             verify,
         )
         self.assertIn(
-            "$GC_RIG_ROOT/worktrees/.cargo-targets/repair-int-<epoch-id>-r<N>/attempt-1",
+            "$GC_RIG_ROOT/worktrees/.cargo-targets/<epoch-id>-repair-int-r<N>/attempt-1",
             verify,
         )
-        self.assertIn('gc worktree publish "thunderdome-epoch-<epoch-id>"', assemble)
-        self.assertIn('gc worktree publish "repair-int-<epoch-id>-r<N>"', verify)
+        self.assertIn('gc worktree publish "<epoch-id>"', assemble)
+        self.assertIn('gc worktree publish "<epoch-id>-repair-int-r<N>"', verify)
         self.assertIn("published_sha", assemble)
         self.assertIn("published_sha", verify)
         self.assertIn("gc.worktree.path", assemble)

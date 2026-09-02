@@ -3,9 +3,9 @@ integration barriers have completed.
 
 Resolve the claimed step and `<workflow-root-id>`. Read the core-authored
 `gc.drain_manifest.v1` and require the drain control plus every manifest row to
-be closed pass. The only valid lifecycle ID is
-`thunderdome-candidate-<workflow-root-id>`. Require that exact value in root
-`gc.worktree.id`, then read `gc.worktree.path`, `work_dir`, `gc.work_dir`,
+be closed pass. The only valid lifecycle ID is `<workflow-root-id>`, whose rig
+bead prefix is authorized by the Code Storage signer. Require that exact value
+in root `gc.worktree.id`, then read `gc.worktree.path`, `work_dir`, `gc.work_dir`,
 `gc.thunderdome.integration_worktree`, the exact 40-character
 `gc.thunderdome.commit`, `gc.thunderdome.published_ref`,
 `gc.thunderdome.published_sha`, `gc.cargo_target_dir`, and `gc.cargo_home`.
@@ -13,7 +13,7 @@ Never reconstruct membership or candidate state from branches, labels,
 descriptions, or session logs.
 
 From `${GC_RIG_ROOT:?}`, run
-`gc worktree list "thunderdome-candidate-<workflow-root-id>" --json` and
+`gc worktree list "<workflow-root-id>" --json` and
 require an array containing exactly one entry. Require its `id`, `owner`, `rig`,
 `rig_root`, `path`, `attempt`, `base`, and `branch` to match the workflow root
 and integration contract exactly. Require `published=true`, a nonempty
@@ -44,7 +44,7 @@ Before the gate, require the registry-owned cache paths to be canonical,
 absolute, writable, outside `/tmp`, and exactly:
 
 ```text
-$GC_RIG_ROOT/worktrees/.cargo-targets/thunderdome-candidate-<workflow-root-id>/attempt-1
+$GC_RIG_ROOT/worktrees/.cargo-targets/<workflow-root-id>/attempt-1
 $GC_RIG_ROOT/.gc/cache/cargo-home
 ```
 

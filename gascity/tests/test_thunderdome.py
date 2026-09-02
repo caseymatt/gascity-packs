@@ -868,7 +868,7 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("SCCACHE_DIR", validate)
         self.assertIn("SCCACHE_CACHE_SIZE", validate)
         self.assertIn(
-            ".cargo-targets/thunderdome-candidate-<workflow-root-id>/attempt-1",
+            ".cargo-targets/<workflow-root-id>/attempt-1",
             validate,
         )
         self.assertIn("gc.thunderdome.validation_commit=<exact HEAD>", validate)
@@ -919,12 +919,12 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("published_ref", item_implement)
         self.assertIn("published_sha", item_implement)
 
-        candidate_id = "thunderdome-candidate-<workflow-root-id>"
+        candidate_id = "<workflow-root-id>"
         self.assertIn(f'gc worktree create "{candidate_id}"', candidate_integrate)
         self.assertIn('--owner "<workflow-root-id>"', candidate_integrate)
         self.assertIn('--base "<exact gc.thunderdome.base_sha>"', candidate_integrate)
         self.assertIn(
-            f"$GC_RIG_ROOT/worktrees/{candidate_id}",
+            "$GC_RIG_ROOT/worktrees/thunderdome-candidate-<workflow-root-id>",
             candidate_integrate,
         )
         self.assertIn(
@@ -942,7 +942,7 @@ class FormulaContractTests(unittest.TestCase):
         self.assertIn("gc.thunderdome.published_sha", candidate_integrate)
         self.assertIn("gc.worktree.owner=<workflow-root-id>", candidate_integrate)
         for lifecycle_fragment in (
-            "gc.worktree.id=thunderdome-candidate-<workflow-root-id>",
+            "gc.worktree.id=<workflow-root-id>",
             "gc.worktree.owner=<workflow-root-id>",
             'gc bd metadata-cas "<workflow-root-id>"',
             "gc.thunderdome.ingress_state",
