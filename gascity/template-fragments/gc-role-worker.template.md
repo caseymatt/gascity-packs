@@ -24,6 +24,7 @@ Read its single JSON result:
   - `bead_id` as `CLAIMED_BEAD_ID`
   - `root_bead_id` as `CLAIMED_ROOT_BEAD_ID`
   - `continuation_group` as `CLAIMED_CONTINUATION_GROUP`
+  - `bead.assignee` as `CLAIMED_ASSIGNEE`; require it to be non-empty
 - `action=drain`: already drain-acked. Exit now.
 - Non-zero exit or malformed result: report failure. Do not search, hand-repair
   assignment, or retry forever. Do not drain or mutate claim state; the command
@@ -44,13 +45,18 @@ Honor bead's requested `gc.outcome` metadata. If no failure contract exists,
 record unrecoverable failure as `gc.outcome=fail` plus concise
 `gc.failure_class` and reason.
 
-Set required metadata before closing same claimed bead:
+Set required metadata before closing same claimed bead. Every close also
+requires a valid `gc.work_outcome`: use `shipped` only with the exact
+`gc.work_commit` and `gc.work_branch`; use `no-op` for successful control,
+verification, or report-only work; use `blocked` or `abandoned` only when that
+is the actual terminal result.
 
 ```bash
 gc bd update "$CLAIMED_BEAD_ID" \
   --set-metadata 'gc.outcome=pass' \
+  --set-metadata 'gc.work_outcome=no-op' \
   --set-metadata 'example.key=example-value'
-gc bd close "$CLAIMED_BEAD_ID"
+BEADS_ACTOR="$CLAIMED_ASSIGNEE" gc bd close "$CLAIMED_BEAD_ID"
 ```
 
 Review findings, missing tests, or follow-up usually are output, not execution
@@ -62,7 +68,7 @@ assignment and close reason. No freeform positional words; `gc bd` treats them
 as more issue ids and may fuzzy-match unrelated beads.
 
 ```bash
-gc bd close "$CLAIMED_BEAD_ID" --reason '...'
+BEADS_ACTOR="$CLAIMED_ASSIGNEE" gc bd close "$CLAIMED_BEAD_ID" --reason '...'
 ```
 
 ## Continue
